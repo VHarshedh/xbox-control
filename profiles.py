@@ -2,19 +2,18 @@
 
 Loads JSON profile definitions (e.g. Shooter, RTS/Menu), validates
 stick sensitivity / response curves and button/trigger mappings,
-and manages profile cycling at runtime via hotkey (F9).
+and manages profile cycling at runtime.
 """
 
 from __future__ import annotations
 
-import ctypes
 import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import vgamepad as vg
+
 from stick_mapper import MouseToStickMapper
 
 # ── Win32 Virtual Key Lookup ─────────────────────────────────────────────
@@ -27,6 +26,8 @@ _VK_NAME_MAP: dict[str, int] = {
     "MOUSE_LEFT": 0x01,
     "MOUSE_RIGHT": 0x02,
     "MOUSE_MIDDLE": 0x04,
+    "MOUSE_X1": 0x05,
+    "MOUSE_X2": 0x06,
     # Standard control keys
     "VK_BACK": 0x08,
     "VK_TAB": 0x09,
@@ -120,8 +121,6 @@ _XUSB_BUTTON_MAP: dict[str, vg.XUSB_BUTTON] = {
     "XUSB_GAMEPAD_Y": vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
     "Y": vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
 }
-
-_TRIGGER_MAP: set[str] = {"LT", "RT", "LEFT_TRIGGER", "RIGHT_TRIGGER"}
 
 INV_SQRT2: float = 1.0 / math.sqrt(2.0)
 
@@ -231,6 +230,8 @@ class Profile:
             "left": [],
             "right": [],
             "middle": [],
+            "x1": [],
+            "x2": [],
         }
         self._key_targets: dict[int, list[str | vg.XUSB_BUTTON]] = {}
         self._all_buttons: set[vg.XUSB_BUTTON] = set()
@@ -256,6 +257,10 @@ class Profile:
                 self._mouse_targets["right"].append(tgt)
             elif upper_src in ("MOUSE_MIDDLE", "MBUTTON"):
                 self._mouse_targets["middle"].append(tgt)
+            elif upper_src in ("MOUSE_X1", "XBUTTON1"):
+                self._mouse_targets["x1"].append(tgt)
+            elif upper_src in ("MOUSE_X2", "XBUTTON2"):
+                self._mouse_targets["x2"].append(tgt)
             else:
                 vk = parse_vk(src_str)
                 self._key_targets.setdefault(vk, []).append(tgt)
@@ -294,6 +299,8 @@ class Profile:
         lbutton: bool,
         rbutton: bool,
         mbutton: bool,
+        xbutton1: bool = False,
+        xbutton2: bool = False,
     ) -> None:
         """Map held keys and mouse buttons to virtual gamepad controls."""
         active_buttons: set[vg.XUSB_BUTTON] = set()
@@ -321,6 +328,24 @@ class Profile:
 
         if mbutton:
             for tgt in self._mouse_targets["middle"]:
+                if tgt == "RT":
+                    rt_active = True
+                elif tgt == "LT":
+                    lt_active = True
+                else:
+                    active_buttons.add(tgt)
+
+        if xbutton1:
+            for tgt in self._mouse_targets["x1"]:
+                if tgt == "RT":
+                    rt_active = True
+                elif tgt == "LT":
+                    lt_active = True
+                else:
+                    active_buttons.add(tgt)
+
+        if xbutton2:
+            for tgt in self._mouse_targets["x2"]:
                 if tgt == "RT":
                     rt_active = True
                 elif tgt == "LT":
@@ -366,7 +391,6 @@ class ProfileManager:
         self.profiles_dir = Path(profiles_dir)
         self.profiles: list[Profile] = []
         self.current_index: int = 0
-        self._f9_was_down: bool = False
 
         self.reload(default_name=default_name)
 
@@ -407,8 +431,25 @@ class ProfileManager:
 
     @staticmethod
     def load_profile(path: Path) -> Profile:
-        """Load and validate a single profile from a JSON file."""
-        with open(path, "r", encoding="utf-8") as f:
+        """Load and validate a single profile from a JSON file.
+
+        Hardened for enterprise security: rejects symlinks and files > 64 KB.
+        """
+        # Security checks
+        if path.is_symlink():
+            raise ValueError(f"Symlinks are rejected for security reasons: {path}")
+
+        try:
+            stat_result = path.stat()
+        except OSError as err:
+            raise ValueError(f"Unable to read file metadata for {path}: {err}") from err
+
+        if stat_result.st_size > 65536:
+            raise ValueError(
+                f"Profile file {path} exceeds maximum permitted size of 64 KB ({stat_result.st_size} bytes)."
+            )
+
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         name = data.get("name")
@@ -426,9 +467,19 @@ class ProfileManager:
             deadzone_comp = float(raw_stick["deadzone_comp"])
             decay_rate = float(raw_stick["decay_rate"])
             smoothing_alpha = float(raw_stick["smoothing_alpha"])
-            invert_y = bool(raw_stick.get("invert_y", False))
         except (KeyError, TypeError, ValueError) as err:
             raise ValueError(f"Profile {path} invalid 'stick_config': {err}") from err
+
+        # Explicit type check for invert_y to avoid bool("false") == True pitfall
+        if "invert_y" in raw_stick:
+            raw_inv = raw_stick["invert_y"]
+            if not isinstance(raw_inv, bool):
+                raise ValueError(
+                    f"Profile {path}: 'invert_y' must be a boolean (true/false), got {type(raw_inv).__name__}."
+                )
+            invert_y = raw_inv
+        else:
+            invert_y = False
 
         if sensitivity <= 0:
             raise ValueError(f"Profile {path}: sensitivity must be > 0.")
@@ -486,20 +537,6 @@ class ProfileManager:
         new_profile = self.current_profile
         new_profile.mapper.reset()
         return new_profile
-
-    def check_f9_hotkey(self) -> bool:
-        """Check for F9 rising-edge press to cycle profiles without swallowing.
-
-        Returns True if F9 was just pressed down this frame and triggered a cycle.
-        """
-        is_down = bool(ctypes.windll.user32.GetAsyncKeyState(VK_F9) & 0x8000)
-        triggered = is_down and not self._f9_was_down
-        self._f9_was_down = is_down
-
-        if triggered:
-            self.cycle()
-            return True
-        return False
 
 
 # ── Self-test ────────────────────────────────────────────────────────────

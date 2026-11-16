@@ -1,13 +1,14 @@
 """Low-level Win32 input hooks for intercepting mouse and keyboard events.
 
 Uses WH_KEYBOARD_LL and WH_MOUSE_LL hooks on a dedicated background
-thread running a Win32 message pump.  F8 toggles capture on/off;
+thread running a Win32 message pump. F8 toggles capture on/off;
 captured events are swallowed so they never reach Chrome, Xbox, etc.
 """
 
 from __future__ import annotations
 
 import atexit
+import contextlib
 import ctypes
 import ctypes.wintypes as wt
 import signal
@@ -16,6 +17,7 @@ import threading
 import time
 from collections.abc import Callable
 from types import TracebackType
+from typing import Any
 
 # ── Win32 Constants ──────────────────────────────────────────────────────
 
@@ -35,10 +37,16 @@ WM_RBUTTONUP: int = 0x0205
 WM_MBUTTONDOWN: int = 0x0207
 WM_MBUTTONUP: int = 0x0208
 WM_MOUSEWHEEL: int = 0x020A
+WM_XBUTTONDOWN: int = 0x020B
+WM_XBUTTONUP: int = 0x020C
 
 WM_QUIT: int = 0x0012
 VK_F8: int = 0x77
+VK_F9: int = 0x78
+
 LLMHF_INJECTED: int = 0x01
+XBUTTON1: int = 0x0001
+XBUTTON2: int = 0x0002
 
 _KEY_DOWN_MSGS: frozenset[int] = frozenset({WM_KEYDOWN, WM_SYSKEYDOWN})
 _KEY_UP_MSGS: frozenset[int] = frozenset({WM_KEYUP, WM_SYSKEYUP})
@@ -61,6 +69,9 @@ ULONG_PTR: type[ctypes.c_size_t] = ctypes.c_size_t
 
 # LRESULT CALLBACK LowLevelProc(int nCode, WPARAM wParam, LPARAM lParam)
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wt.WPARAM, wt.LPARAM)
+
+# BOOL WINAPI HandlerRoutine(DWORD dwCtrlType)
+PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wt.BOOL, wt.DWORD)
 
 # ── Win32 Structures ────────────────────────────────────────────────────
 
@@ -125,6 +136,9 @@ _user32.PostThreadMessageW.restype = wt.BOOL
 _user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
 _user32.SetCursorPos.restype = wt.BOOL
 
+_user32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+_user32.GetCursorPos.restype = wt.BOOL
+
 _user32.GetSystemMetrics.argtypes = [ctypes.c_int]
 _user32.GetSystemMetrics.restype = ctypes.c_int
 
@@ -134,28 +148,44 @@ _kernel32.GetCurrentThreadId.restype = wt.DWORD
 _kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
 _kernel32.GetModuleHandleW.restype = wt.HMODULE
 
+_kernel32.SetConsoleCtrlHandler.argtypes = [PHANDLER_ROUTINE, wt.BOOL]
+_kernel32.SetConsoleCtrlHandler.restype = wt.BOOL
+
+
+# ── DPI Awareness Initialization ─────────────────────────────────────────
+
+def _enable_per_monitor_dpi_awareness() -> None:
+    """Enable Per-Monitor V2 DPI awareness for pixel-accurate cursor geometry."""
+    try:
+        _user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        _user32.SetProcessDpiAwarenessContext.restype = wt.BOOL
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+        if _user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        _user32.SetProcessDPIAware.argtypes = []
+        _user32.SetProcessDPIAware.restype = wt.BOOL
+        _user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
+_enable_per_monitor_dpi_awareness()
+
 
 # ── InputHooks ───────────────────────────────────────────────────────────
 
 
 class InputHooks:
-    """Low-level Win32 keyboard/mouse hooks with F8 toggle.
+    """Low-level Win32 keyboard/mouse hooks with F8 toggle and F9 cycling.
 
-    When *active* (toggled by F8), every keyboard and mouse event is
-    recorded into thread-safe buffers and **swallowed** (return 1) so
-    Chrome, the Xbox app, or any other foreground window sees nothing.
-
-    Usage::
-
-        with InputHooks() as hooks:
-            while True:
-                if hooks.active:
-                    dx, dy = hooks.consume_mouse_delta()
-                    keys   = hooks.get_keys_pressed()
-                    ...
-
-    The ``on_toggle`` callback, if supplied, **must complete in < 1 ms**
-    because it runs inside the low-level hook callback on the pump thread.
+    When *active* (toggled by F8), keyboard and mouse events are recorded
+    into thread-safe buffers and swallowed (return 1) to prevent leakage
+    to foreground applications. F9 requests are queued atomically for
+    safe profile cycling without input contention.
     """
 
     # ── Construction ─────────────────────────────────────────────────────
@@ -176,6 +206,8 @@ class InputHooks:
         # Public observable state (written only on hook thread)
         self._active: bool = False
         self._f8_held: bool = False
+        self._f9_held: bool = False
+        self._profile_cycle_requested: bool = False
 
         # Keyboard: set of currently-pressed virtual-key codes
         self._keys_lock = threading.Lock()
@@ -189,6 +221,8 @@ class InputHooks:
         self._lbutton: bool = False
         self._rbutton: bool = False
         self._mbutton: bool = False
+        self._xbutton1: bool = False
+        self._xbutton2: bool = False
         self._wheel_delta: int = 0
 
         # Hook handles (pointer-sized)
@@ -200,12 +234,13 @@ class InputHooks:
         self._thread_id: int = 0
         self._ready = threading.Event()
 
-        # prevent GC of ctypes callback wrappers ──────────────────────────
-        self._kb_proc_ref: HOOKPROC = HOOKPROC(self._keyboard_ll_proc)
-        self._mouse_proc_ref: HOOKPROC = HOOKPROC(self._mouse_ll_proc)
+        # Prevent GC of ctypes callback wrappers
+        self._kb_proc_ref: Any = HOOKPROC(self._keyboard_ll_proc)
+        self._mouse_proc_ref: Any = HOOKPROC(self._mouse_ll_proc)
+        self._console_ctrl_routine: Any = None
 
-        # Cleanup guard
-        self._cleanup_lock = threading.Lock()
+        # Reentrant cleanup guard to prevent signal-handler self-deadlock
+        self._cleanup_lock = threading.RLock()
         self._running: bool = False
 
         # Stash originals for failsafe restoration
@@ -236,15 +271,33 @@ class InputHooks:
             self._wheel_delta = 0
         return d
 
+    def consume_profile_cycle(self) -> bool:
+        """Atomically check and consume any pending F9 profile cycle request."""
+        with self._keys_lock:
+            req = self._profile_cycle_requested
+            self._profile_cycle_requested = False
+            return req
+
     def get_keys_pressed(self) -> frozenset[int]:
         """Snapshot of currently held virtual-key codes."""
         with self._keys_lock:
             return frozenset(self._keys_down)
 
-    def get_mouse_buttons(self) -> tuple[bool, bool, bool]:
-        """Return ``(left, right, middle)`` button-down states."""
+    def get_mouse_buttons(self) -> tuple[bool, bool, bool, bool, bool]:
+        """Return ``(left, right, middle, xbutton1, xbutton2)`` button states."""
         with self._mouse_lock:
-            return self._lbutton, self._rbutton, self._mbutton
+            return (
+                self._lbutton,
+                self._rbutton,
+                self._mbutton,
+                self._xbutton1,
+                self._xbutton2,
+            )
+
+    def get_extra_mouse_buttons(self) -> tuple[bool, bool]:
+        """Return ``(xbutton1, xbutton2)`` button states."""
+        with self._mouse_lock:
+            return self._xbutton1, self._xbutton2
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -285,17 +338,15 @@ class InputHooks:
         if tid:
             _user32.PostThreadMessageW(wt.DWORD(tid), WM_QUIT, 0, 0)
 
-        # Wait for pump thread to finish (hooks are unhooked in its finally)
+        # Wait for pump thread to finish
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=3.0)
 
-        # Belt-and-suspenders: unhook from *this* thread if still hooked
+        # Force unhook from this thread if still active
         self._force_unhook()
 
-        try:
+        with contextlib.suppress(Exception):
             atexit.unregister(self.stop)
-        except Exception:
-            pass
 
         self._restore_failsafes()
 
@@ -318,23 +369,21 @@ class InputHooks:
     def _pump_thread(self) -> None:
         """Install hooks, run the Win32 message loop, unhook on exit."""
         try:
-            # Force-create a message queue before anyone posts to us
             msg = wt.MSG()
             _user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)
 
             hmod = _kernel32.GetModuleHandleW(None)
 
-            # ── install keyboard hook ──
+            # Keyboard hook
             self._kb_hook = _user32.SetWindowsHookExW(
                 WH_KEYBOARD_LL, self._kb_proc_ref, hmod, 0,
             )
             if not self._kb_hook:
                 raise OSError(
-                    f"SetWindowsHookExW(WH_KEYBOARD_LL) failed: "
-                    f"{ctypes.WinError()}"
+                    f"SetWindowsHookExW(WH_KEYBOARD_LL) failed: {ctypes.WinError()}"
                 )
 
-            # ── install mouse hook ──
+            # Mouse hook
             self._mouse_hook = _user32.SetWindowsHookExW(
                 WH_MOUSE_LL, self._mouse_proc_ref, hmod, 0,
             )
@@ -342,17 +391,16 @@ class InputHooks:
                 _user32.UnhookWindowsHookEx(self._kb_hook)
                 self._kb_hook = 0
                 raise OSError(
-                    f"SetWindowsHookExW(WH_MOUSE_LL) failed: "
-                    f"{ctypes.WinError()}"
+                    f"SetWindowsHookExW(WH_MOUSE_LL) failed: {ctypes.WinError()}"
                 )
 
             self._thread_id = _kernel32.GetCurrentThreadId()
             self._ready.set()
 
-            # ── message pump (drives low-level hook callbacks) ──
+            # Message pump
             while True:
                 ret = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-                if ret <= 0:  # 0 → WM_QUIT, -1 → error
+                if ret <= 0:
                     break
         finally:
             self._force_unhook()
@@ -367,46 +415,57 @@ class InputHooks:
         if ms:
             _user32.UnhookWindowsHookEx(ms)
 
-    # ── Hook Callbacks (ultra-fast, <1 ms) ───────────────────────────────
+    # ── Hook Callbacks ───────────────────────────────────────────────────
 
     def _keyboard_ll_proc(
         self, nCode: int, wParam: int, lParam: int,
     ) -> int:
-        """``WH_KEYBOARD_LL`` callback — capture keys or pass through."""
+        """``WH_KEYBOARD_LL`` callback — capture keys, handle F8/F9 or pass through."""
         try:
             if nCode < 0:
-                return _user32.CallNextHookEx(
+                return int(_user32.CallNextHookEx(
                     self._kb_hook, nCode, wParam, lParam,
-                )
+                ))
 
             kbd = ctypes.cast(
                 lParam, ctypes.POINTER(KBDLLHOOKSTRUCT),
             ).contents
             vk: int = kbd.vkCode
 
-            # ── Toggle key (F8) — always passed through ──
+            # ── Toggle key (F8) ──
             if vk == self._toggle_vk:
                 if wParam in _KEY_DOWN_MSGS and not self._f8_held:
                     self._f8_held = True
                     new_active = not self._active
-                    self._active = new_active
+
                     if new_active:
-                        # Center cursor and store center point as last_pt baseline
+                        # Center cursor *before* activating capture
                         cx = _user32.GetSystemMetrics(0) // 2
                         cy = _user32.GetSystemMetrics(1) // 2
                         _user32.SetCursorPos(cx, cy)
-                        # Reset all accumulators on activation
+
+                        # Read actual landed cursor coordinate
+                        landed = wt.POINT()
+                        if _user32.GetCursorPos(ctypes.byref(landed)):
+                            actual_pt = (landed.x, landed.y)
+                        else:
+                            actual_pt = (cx, cy)
+
                         with self._mouse_lock:
-                            self._last_pt = (cx, cy)
+                            self._last_pt = actual_pt
                             self._dx = self._dy = 0
                             self._lbutton = False
                             self._rbutton = False
                             self._mbutton = False
+                            self._xbutton1 = False
+                            self._xbutton2 = False
                             self._wheel_delta = 0
                         with self._keys_lock:
                             self._keys_down.clear()
+
+                        self._active = True
                     else:
-                        # Clear state on deactivation
+                        self._active = False
                         with self._keys_lock:
                             self._keys_down.clear()
                         with self._mouse_lock:
@@ -414,20 +473,41 @@ class InputHooks:
                             self._lbutton = False
                             self._rbutton = False
                             self._mbutton = False
+                            self._xbutton1 = False
+                            self._xbutton2 = False
+
                     if self._on_toggle is not None:
                         self._on_toggle(new_active)
+
                 elif wParam in _KEY_UP_MSGS:
                     self._f8_held = False
-                # NEVER swallow the toggle key
-                return _user32.CallNextHookEx(
-                    self._kb_hook, nCode, wParam, lParam,
-                )
 
-            # ── Additional passthrough keys (e.g. F9 profile switch) ──
-            if vk in self._passthrough_keys:
-                return _user32.CallNextHookEx(
+                # NEVER swallow the toggle key
+                return int(_user32.CallNextHookEx(
                     self._kb_hook, nCode, wParam, lParam,
-                )
+                ))
+
+            # ── Profile cycle hotkey (F9) ──
+            if vk == VK_F9:
+                if wParam in _KEY_DOWN_MSGS and not self._f9_held:
+                    self._f9_held = True
+                    with self._keys_lock:
+                        self._profile_cycle_requested = True
+                elif wParam in _KEY_UP_MSGS:
+                    self._f9_held = False
+
+                # When active, swallow F9 so game UI never sees it
+                if self._active:
+                    return 1
+                return int(_user32.CallNextHookEx(
+                    self._kb_hook, nCode, wParam, lParam,
+                ))
+
+            # ── Additional configured passthrough keys ──
+            if vk in self._passthrough_keys:
+                return int(_user32.CallNextHookEx(
+                    self._kb_hook, nCode, wParam, lParam,
+                ))
 
             # ── Active → record and swallow ──
             if self._active:
@@ -437,12 +517,12 @@ class InputHooks:
                 elif wParam in _KEY_UP_MSGS:
                     with self._keys_lock:
                         self._keys_down.discard(vk)
-                return 1  # swallow
+                return 1
 
         except Exception:
-            pass  # Never let a Python exception escape into Win32
+            pass
 
-        return _user32.CallNextHookEx(self._kb_hook, nCode, wParam, lParam)
+        return int(_user32.CallNextHookEx(self._kb_hook, nCode, wParam, lParam))
 
     def _mouse_ll_proc(
         self, nCode: int, wParam: int, lParam: int,
@@ -450,30 +530,30 @@ class InputHooks:
         """``WH_MOUSE_LL`` callback — capture mouse or pass through."""
         try:
             if nCode < 0 or not self._active:
-                return _user32.CallNextHookEx(
+                return int(_user32.CallNextHookEx(
                     self._mouse_hook, nCode, wParam, lParam,
-                )
+                ))
 
             mouse = ctypes.cast(
                 lParam, ctypes.POINTER(MSLLHOOKSTRUCT),
             ).contents
 
-            # Ignore injected events (e.g. from SetCursorPos)
+            # Ignore injected synthetic events (e.g. from SetCursorPos)
             if mouse.flags & LLMHF_INJECTED:
                 return 1
 
             msg: int = wParam
 
-            # ── Movement → accumulate dx/dy ──
+            # ── Movement → accumulate dx/dy without overwriting baseline ──
             if msg == WM_MOUSEMOVE:
                 x, y = mouse.pt.x, mouse.pt.y
                 with self._mouse_lock:
                     if self._last_pt is not None:
                         self._dx += x - self._last_pt[0]
                         self._dy += y - self._last_pt[1]
-                return 1  # swallow (cursor freezes)
+                return 1
 
-            # ── Button down ──
+            # ── Standard buttons down ──
             btn = _BTN_DOWN_MAP.get(msg)
             if btn is not None:
                 with self._mouse_lock:
@@ -485,7 +565,7 @@ class InputHooks:
                         self._mbutton = True
                 return 1
 
-            # ── Button up ──
+            # ── Standard buttons up ──
             btn = _BTN_UP_MAP.get(msg)
             if btn is not None:
                 with self._mouse_lock:
@@ -497,29 +577,58 @@ class InputHooks:
                         self._mbutton = False
                 return 1
 
+            # ── X buttons down (thumb buttons) ──
+            if msg == WM_XBUTTONDOWN:
+                xbtn = (mouse.mouseData >> 16) & 0xFFFF
+                with self._mouse_lock:
+                    if xbtn == XBUTTON1:
+                        self._xbutton1 = True
+                    elif xbtn == XBUTTON2:
+                        self._xbutton2 = True
+                return 1
+
+            # ── X buttons up ──
+            if msg == WM_XBUTTONUP:
+                xbtn = (mouse.mouseData >> 16) & 0xFFFF
+                with self._mouse_lock:
+                    if xbtn == XBUTTON1:
+                        self._xbutton1 = False
+                    elif xbtn == XBUTTON2:
+                        self._xbutton2 = False
+                return 1
+
             # ── Mouse wheel ──
             if msg == WM_MOUSEWHEEL:
-                # Signed wheel delta lives in the high word of mouseData
                 raw: int = mouse.mouseData
                 delta: int = ctypes.c_short((raw >> 16) & 0xFFFF).value
                 with self._mouse_lock:
                     self._wheel_delta += delta
                 return 1
 
-            # Any other mouse message while active → swallow
             return 1
 
         except Exception:
             pass
 
-        return _user32.CallNextHookEx(
+        return int(_user32.CallNextHookEx(
             self._mouse_hook, nCode, wParam, lParam,
-        )
+        ))
+
+    # ── Console Control Handler ──────────────────────────────────────────
+
+    def _console_ctrl_handler(self, ctrl_type: int) -> int:
+        """Handle console close, break, or shutdown events cleanly."""
+        self.stop()
+        return 0  # Pass through to default handler
 
     # ── Failsafe Registration ────────────────────────────────────────────
 
     def _install_failsafes(self) -> None:
-        """Register SIGINT/SIGTERM handlers, sys.excepthook override."""
+        """Register SIGINT/SIGTERM, console ctrl, and excepthook overrides."""
+        # Console control handler for Windows CLI / Close Window events
+        self._console_ctrl_routine = PHANDLER_ROUTINE(self._console_ctrl_handler)
+        _kernel32.SetConsoleCtrlHandler(self._console_ctrl_routine, True)
+
         # Signal handlers (main thread only)
         if threading.current_thread() is threading.main_thread():
             self._orig_sigint = signal.getsignal(signal.SIGINT)
@@ -548,17 +657,20 @@ class InputHooks:
         sys.excepthook = _excepthook
 
     def _restore_failsafes(self) -> None:
-        """Restore original signal handlers and excepthook."""
+        """Restore original console handler, signal handlers, and excepthook."""
+        if self._console_ctrl_routine is not None:
+            with contextlib.suppress(Exception):
+                _kernel32.SetConsoleCtrlHandler(self._console_ctrl_routine, False)
+            self._console_ctrl_routine = None
+
         if threading.current_thread() is threading.main_thread():
             try:
                 signal.signal(signal.SIGINT, self._orig_sigint)
                 signal.signal(signal.SIGTERM, self._orig_sigterm)
             except (OSError, ValueError):
                 pass
-        try:
+        with contextlib.suppress(Exception):
             sys.excepthook = self._orig_excepthook
-        except Exception:
-            pass
 
 
 # ── Class Alias ──────────────────────────────────────────────────────────
@@ -573,6 +685,7 @@ def main() -> None:
     print("InputHooks self-test")
     print("=" * 55)
     print("  Press F8 to toggle capture ON / OFF.")
+    print("  Press F9 to test profile cycle flag.")
     print("  While ON every key / mouse event is swallowed.")
     print("  Press Ctrl+C to exit early.")
     print("  Auto-exits after 10 seconds.")
@@ -580,7 +693,6 @@ def main() -> None:
 
     def _on_toggle(now_active: bool) -> None:
         tag = "ON  ✓" if now_active else "OFF ✗"
-        # print() is fast enough for a low-level hook callback self-test
         print(f"  [F8] Capture toggled → {tag}")
 
     hooks = InputHooks(on_toggle=_on_toggle)
@@ -590,13 +702,16 @@ def main() -> None:
             t0 = time.monotonic()
             while time.monotonic() - t0 < 10.0:
                 time.sleep(0.20)
+                if hooks.consume_profile_cycle():
+                    print("  [F9] Profile cycle consumed!")
+
                 if not hooks.active:
                     continue
 
                 dx, dy = hooks.consume_mouse_delta()
                 wheel = hooks.consume_wheel_delta()
                 keys = hooks.get_keys_pressed()
-                lb, rb, mb = hooks.get_mouse_buttons()
+                lb, rb, mb, x1, x2 = hooks.get_mouse_buttons()
 
                 parts: list[str] = []
                 if dx or dy:
@@ -606,7 +721,13 @@ def main() -> None:
                 if keys:
                     vk_hex = [f"0x{k:02X}" for k in sorted(keys)]
                     parts.append(f"keys [{', '.join(vk_hex)}]")
-                btns = ("L" if lb else "") + ("R" if rb else "") + ("M" if mb else "")
+                btns = (
+                    ("L" if lb else "")
+                    + ("R" if rb else "")
+                    + ("M" if mb else "")
+                    + ("X1" if x1 else "")
+                    + ("X2" if x2 else "")
+                )
                 if btns:
                     parts.append(f"btn [{btns}]")
                 if parts:

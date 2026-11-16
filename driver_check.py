@@ -6,11 +6,13 @@ virtual Xbox 360 controller creation via the vgamepad library.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import ctypes.wintypes as wt
 import platform
 import subprocess
 import sys
-from enum import IntEnum, auto
+from enum import IntEnum
 
 
 class Status(IntEnum):
@@ -42,41 +44,13 @@ def check_windows_os() -> tuple[bool, str]:
 
 
 def check_vigembus_service() -> tuple[bool, str]:
-    """Query the ViGEmBus Windows service via `sc query`.
+    """Query the ViGEmBus Windows service status.
 
-    Returns a (success, detail) tuple. Falls back to ctypes
-    Service Control Manager if `sc` is unavailable.
+    Checks the Service Control Manager via Win32 advapi32 ctypes first
+    (locale-independent, avoids 64-bit pointer truncation). Falls back
+    to `sc query ViGEmBus` if ctypes SCM query fails.
     """
-    # --- Attempt 1: `sc query` (most portable across Windows editions) ---
-    try:
-        result = subprocess.run(
-            ["sc", "query", "ViGEmBus"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        output = result.stdout + result.stderr
-
-        if result.returncode == 0 and "RUNNING" in output.upper():
-            return True, "ViGEmBus service is installed and RUNNING."
-
-        if result.returncode == 0:
-            # Service exists but isn't running.
-            return False, (
-                "ViGEmBus service is installed but NOT running.\n"
-                "  → Try: sc start ViGEmBus  (as Administrator)\n"
-                "  → Or reboot after installing ViGEmBus v1.17.333+."
-            )
-
-        # returncode != 0 — service likely not installed
-        return False, _vigembus_install_message()
-
-    except FileNotFoundError:
-        pass  # `sc` not on PATH; fall through to ctypes
-    except subprocess.TimeoutExpired:
-        pass  # system under load; fall through
-
-    # --- Attempt 2: Win32 Service Control Manager via ctypes ---
+    # --- Attempt 1: Win32 Service Control Manager via ctypes (Primary) ---
     try:
         advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
 
@@ -85,7 +59,7 @@ def check_vigembus_service() -> tuple[bool, str]:
         SERVICE_RUNNING: int = 0x0004
 
         class SERVICE_STATUS(ctypes.Structure):
-            """Minimal SERVICE_STATUS structure (Win32)."""
+            """Win32 SERVICE_STATUS structure."""
             _fields_ = [
                 ("dwServiceType", ctypes.c_ulong),
                 ("dwCurrentState", ctypes.c_ulong),
@@ -96,27 +70,69 @@ def check_vigembus_service() -> tuple[bool, str]:
                 ("dwWaitHint", ctypes.c_ulong),
             ]
 
+        # Explicit prototypes to prevent 64-bit pointer truncation
+        advapi32.OpenSCManagerW.argtypes = [wt.LPCWSTR, wt.LPCWSTR, wt.DWORD]
+        advapi32.OpenSCManagerW.restype = ctypes.c_void_p
+
+        advapi32.OpenServiceW.argtypes = [ctypes.c_void_p, wt.LPCWSTR, wt.DWORD]
+        advapi32.OpenServiceW.restype = ctypes.c_void_p
+
+        advapi32.QueryServiceStatus.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(SERVICE_STATUS),
+        ]
+        advapi32.QueryServiceStatus.restype = wt.BOOL
+
+        advapi32.CloseServiceHandle.argtypes = [ctypes.c_void_p]
+        advapi32.CloseServiceHandle.restype = wt.BOOL
+
         scm = advapi32.OpenSCManagerW(None, None, SC_MANAGER_CONNECT)
-        if not scm:
-            return False, "Unable to open Service Control Manager."
+        if scm:
+            try:
+                svc = advapi32.OpenServiceW(scm, "ViGEmBus", SERVICE_QUERY_STATUS)
+                if svc:
+                    try:
+                        status = SERVICE_STATUS()
+                        ok = advapi32.QueryServiceStatus(svc, ctypes.byref(status))
+                        if ok and status.dwCurrentState == SERVICE_RUNNING:
+                            return True, "ViGEmBus service is installed and RUNNING."
+                        if ok:
+                            return False, (
+                                "ViGEmBus service is installed but NOT running.\n"
+                                "  → Try: sc start ViGEmBus  (as Administrator)\n"
+                                "  → Or reboot after installing ViGEmBus v1.17.333+."
+                            )
+                    finally:
+                        advapi32.CloseServiceHandle(svc)
+                else:
+                    # Service not registered in SCM
+                    return False, _vigembus_install_message()
+            finally:
+                advapi32.CloseServiceHandle(scm)
+    except Exception:
+        pass  # Fall through to `sc query` fallback
 
-        svc = advapi32.OpenServiceW(scm, "ViGEmBus", SERVICE_QUERY_STATUS)
-        if not svc:
-            advapi32.CloseServiceHandle(scm)
-            return False, _vigembus_install_message()
-
-        status = SERVICE_STATUS()
-        ok = advapi32.QueryServiceStatus(svc, ctypes.byref(status))
-        advapi32.CloseServiceHandle(svc)
-        advapi32.CloseServiceHandle(scm)
-
-        if ok and status.dwCurrentState == SERVICE_RUNNING:
-            return True, "ViGEmBus service is installed and RUNNING (ctypes)."
-
-        return False, (
-            "ViGEmBus service is installed but NOT running (ctypes).\n"
-            "  → Try starting it or reboot after installing ViGEmBus v1.17.333+."
+    # --- Attempt 2: `sc query` (Fallback) ---
+    try:
+        result = subprocess.run(
+            ["sc", "query", "ViGEmBus"],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
+        output = result.stdout + result.stderr
+
+        if result.returncode == 0 and "RUNNING" in output.upper():
+            return True, "ViGEmBus service is installed and RUNNING (sc query fallback)."
+
+        if result.returncode == 0:
+            return False, (
+                "ViGEmBus service is installed but NOT running.\n"
+                "  → Try: sc start ViGEmBus  (as Administrator)\n"
+                "  → Or reboot after installing ViGEmBus v1.17.333+."
+            )
+
+        return False, _vigembus_install_message()
 
     except Exception as exc:
         return False, f"Could not query ViGEmBus service: {exc}"
@@ -147,10 +163,8 @@ def check_vgamepad_controller() -> tuple[bool, str]:
         )
     finally:
         if gamepad is not None:
-            try:
+            with contextlib.suppress(Exception):
                 del gamepad  # releases the virtual controller
-            except Exception:
-                pass
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────

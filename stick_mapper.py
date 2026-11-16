@@ -16,6 +16,7 @@ import ctypes
 import math
 import sys
 import time
+from collections.abc import Callable
 
 # ── Module constants ─────────────────────────────────────────────────────
 
@@ -363,7 +364,7 @@ def main() -> None:
         print("SKIP — Windows is required.")
         sys.exit(0)
 
-    tests: list[tuple[str, object]] = [
+    tests: list[tuple[str, Callable[[], tuple[bool, str]]]] = [
         ("Zero-input recentering",  _test_recentering),
         ("Deadzone jump",           _test_deadzone_jump),
         ("Diagonal normalization",  _test_diagonal_normalization),
