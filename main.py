@@ -99,6 +99,7 @@ def run_mapper() -> int:
                 # ── State transition detection ──
                 if active != was_active:
                     if active:
+                        timer.reset()
                         profile_mgr.current_profile.mapper.reset()
                         print(f"[ON] Profile: {profile_mgr.current_profile.name}", flush=True)
                     else:

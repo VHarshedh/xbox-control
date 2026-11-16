@@ -77,6 +77,12 @@ class HighResTimer:
     def __exit__(self, *exc: object) -> None:
         _winmm.timeEndPeriod(ctypes.c_uint(1))
 
+    def reset(self) -> None:
+        """Resync _next and _last to time.perf_counter()."""
+        now = time.perf_counter()
+        self._next = now + self._dt
+        self._last = now
+
     # ── tick ─────────────────────────────────────────────────────────────
 
     def wait(self) -> float:

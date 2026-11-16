@@ -38,6 +38,7 @@ WM_MOUSEWHEEL: int = 0x020A
 
 WM_QUIT: int = 0x0012
 VK_F8: int = 0x77
+LLMHF_INJECTED: int = 0x01
 
 _KEY_DOWN_MSGS: frozenset[int] = frozenset({WM_KEYDOWN, WM_SYSKEYDOWN})
 _KEY_UP_MSGS: frozenset[int] = frozenset({WM_KEYUP, WM_SYSKEYUP})
@@ -120,6 +121,12 @@ _user32.PostThreadMessageW.argtypes = [
     wt.DWORD, wt.UINT, wt.WPARAM, wt.LPARAM,
 ]
 _user32.PostThreadMessageW.restype = wt.BOOL
+
+_user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+_user32.SetCursorPos.restype = wt.BOOL
+
+_user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+_user32.GetSystemMetrics.restype = ctypes.c_int
 
 _kernel32.GetCurrentThreadId.argtypes = []
 _kernel32.GetCurrentThreadId.restype = wt.DWORD
@@ -384,9 +391,13 @@ class InputHooks:
                     new_active = not self._active
                     self._active = new_active
                     if new_active:
+                        # Center cursor and store center point as last_pt baseline
+                        cx = _user32.GetSystemMetrics(0) // 2
+                        cy = _user32.GetSystemMetrics(1) // 2
+                        _user32.SetCursorPos(cx, cy)
                         # Reset all accumulators on activation
                         with self._mouse_lock:
-                            self._last_pt = None
+                            self._last_pt = (cx, cy)
                             self._dx = self._dy = 0
                             self._lbutton = False
                             self._rbutton = False
@@ -399,6 +410,7 @@ class InputHooks:
                         with self._keys_lock:
                             self._keys_down.clear()
                         with self._mouse_lock:
+                            self._last_pt = None
                             self._lbutton = False
                             self._rbutton = False
                             self._mbutton = False
@@ -445,6 +457,11 @@ class InputHooks:
             mouse = ctypes.cast(
                 lParam, ctypes.POINTER(MSLLHOOKSTRUCT),
             ).contents
+
+            # Ignore injected events (e.g. from SetCursorPos)
+            if mouse.flags & LLMHF_INJECTED:
+                return 1
+
             msg: int = wParam
 
             # ── Movement → accumulate dx/dy ──
@@ -454,7 +471,6 @@ class InputHooks:
                     if self._last_pt is not None:
                         self._dx += x - self._last_pt[0]
                         self._dy += y - self._last_pt[1]
-                    self._last_pt = (x, y)
                 return 1  # swallow (cursor freezes)
 
             # ── Button down ──
