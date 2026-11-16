@@ -1,0 +1,33 @@
+{
+    "name": "Shooter",
+    "stick_config": {
+        "sensitivity": 0.080,
+        "curve_exponent": 1.3,
+        "deadzone_comp": 0.18,
+        "decay_rate": 0.72,
+        "smoothing_alpha": 0.38,
+        "invert_y": false
+    },
+    "wasd_left_stick": {
+        "up": 87,
+        "down": 83,
+        "left": 65,
+        "right": 68
+    },
+    "buttons": {
+        "MOUSE_LEFT": "RT",
+        "MOUSE_RIGHT": "LT",
+        "VK_SPACE": "XUSB_GAMEPAD_A",
+        "VK_LSHIFT": "XUSB_GAMEPAD_LEFT_THUMB",
+        "VK_E": "XUSB_GAMEPAD_X",
+        "VK_R": "XUSB_GAMEPAD_Y",
+        "VK_F": "XUSB_GAMEPAD_B",
+        "VK_Q": "XUSB_GAMEPAD_LEFT_SHOULDER",
+        "VK_C": "XUSB_GAMEPAD_RIGHT_THUMB",
+        "VK_TAB": "XUSB_GAMEPAD_BACK",
+        "VK_ESCAPE": "XUSB_GAMEPAD_START",
+        "VK_Z": "XUSB_GAMEPAD_DPAD_LEFT",
+        "VK_X": "XUSB_GAMEPAD_DPAD_DOWN",
+        "VK_G": "XUSB_GAMEPAD_DPAD_RIGHT"
+    }
+}

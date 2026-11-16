@@ -1,0 +1,29 @@
+{
+    "name": "RTS / Menu",
+    "stick_config": {
+        "sensitivity": 0.035,
+        "curve_exponent": 1.8,
+        "deadzone_comp": 0.08,
+        "decay_rate": 0.93,
+        "smoothing_alpha": 0.55,
+        "invert_y": false
+    },
+    "wasd_left_stick": {
+        "up": 87,
+        "down": 83,
+        "left": 65,
+        "right": 68
+    },
+    "buttons": {
+        "MOUSE_LEFT": "XUSB_GAMEPAD_A",
+        "MOUSE_RIGHT": "XUSB_GAMEPAD_B",
+        "VK_SPACE": "XUSB_GAMEPAD_A",
+        "VK_LSHIFT": "XUSB_GAMEPAD_X",
+        "VK_E": "XUSB_GAMEPAD_Y",
+        "VK_R": "XUSB_GAMEPAD_X",
+        "VK_Q": "XUSB_GAMEPAD_LEFT_SHOULDER",
+        "VK_F": "XUSB_GAMEPAD_RIGHT_SHOULDER",
+        "VK_TAB": "XUSB_GAMEPAD_BACK",
+        "VK_ESCAPE": "XUSB_GAMEPAD_START"
+    }
+}
