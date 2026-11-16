@@ -9,10 +9,12 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import ctypes.wintypes as wt
+import os
 import platform
 import subprocess
 import sys
 from enum import IntEnum
+from pathlib import Path
 
 
 class Status(IntEnum):
@@ -112,10 +114,14 @@ def check_vigembus_service() -> tuple[bool, str]:
     except Exception:
         pass  # Fall through to `sc query` fallback
 
-    # --- Attempt 2: `sc query` (Fallback) ---
+    # --- Attempt 2: `sc.exe query` (Fallback - Hardened against CWE-426/427) ---
     try:
+        sc_path = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "sc.exe"
+        if not sc_path.is_file():
+            return False, _vigembus_install_message()
+
         result = subprocess.run(
-            ["sc", "query", "ViGEmBus"],
+            [str(sc_path), "query", "ViGEmBus"],
             capture_output=True,
             text=True,
             timeout=10,

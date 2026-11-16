@@ -133,6 +133,49 @@ class TestProfileSecurityAndValidation:
         with pytest.raises(ValueError, match="deadzone_comp must be in"):
             ProfileManager.load_profile(profile)
 
+    def test_nan_rejection(self, tmp_path: Path) -> None:
+        nan_file = tmp_path / "nan_profile.json"
+        nan_file.write_text(
+            '{"name": "NaN Profile", "stick_config": {"sensitivity": NaN, "curve_exponent": 1.0, "deadzone_comp": 0.1, "decay_rate": 0.8, "smoothing_alpha": 0.5}, "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68}, "buttons": {}}',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Non-finite JSON constant"):
+            ProfileManager.load_profile(nan_file)
+
+    def test_infinity_rejection(self, tmp_path: Path) -> None:
+        inf_file = tmp_path / "inf_profile.json"
+        inf_file.write_text(
+            '{"name": "Inf Profile", "stick_config": {"sensitivity": Infinity, "curve_exponent": 1.0, "deadzone_comp": 0.1, "decay_rate": 0.8, "smoothing_alpha": 0.5}, "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68}, "buttons": {}}',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Non-finite JSON constant"):
+            ProfileManager.load_profile(inf_file)
+
+    def test_path_containment_violation(self, tmp_path: Path) -> None:
+        base_dir = tmp_path / "allowed_dir"
+        base_dir.mkdir()
+
+        outside_dir = tmp_path / "outside_dir"
+        outside_dir.mkdir()
+
+        outside_file = outside_dir / "external.json"
+        data = {
+            "name": "Outside Profile",
+            "stick_config": {
+                "sensitivity": 0.05,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {},
+        }
+        outside_file.write_text(json.dumps(data), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Path containment violation"):
+            ProfileManager.load_profile(outside_file, base_dir=base_dir)
+
 
 class TestWASDNormalization:
     """Validate directional Left Stick calculations."""

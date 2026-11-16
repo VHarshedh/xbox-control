@@ -41,9 +41,10 @@ select = [
     "SIM", # flake8-simplify
 ]
 ignore = [
-    "E501", # Line length handled by formatter
-    "B008", # Function calls in argument defaults
-    "E722", # Bare except in Win32 low-level hooks
+    "E501",   # Line length handled by formatter
+    "B008",   # Function calls in argument defaults
+    "E722",   # Bare except in Win32 low-level hooks
+    "SIM112", # Environment variable capitalization
 ]
 
 [tool.mypy]

@@ -43,6 +43,10 @@ WM_XBUTTONUP: int = 0x020C
 WM_QUIT: int = 0x0012
 VK_F8: int = 0x77
 VK_F9: int = 0x78
+VK_LWIN: int = 0x5B
+VK_RWIN: int = 0x5C
+
+DEFAULT_PASSTHROUGH_KEYS: frozenset[int] = frozenset({VK_LWIN, VK_RWIN})
 
 LLMHF_INJECTED: int = 0x01
 XBUTTON1: int = 0x0001
@@ -173,9 +177,6 @@ def _enable_per_monitor_dpi_awareness() -> None:
         pass
 
 
-_enable_per_monitor_dpi_awareness()
-
-
 # ── InputHooks ───────────────────────────────────────────────────────────
 
 
@@ -198,9 +199,10 @@ class InputHooks:
         on_toggle: Callable[[bool], None] | None = None,
     ) -> None:
         self._toggle_vk: int = toggle_key
-        self._passthrough_keys: frozenset[int] = (
-            frozenset(passthrough_keys) if passthrough_keys is not None else frozenset()
-        )
+        if passthrough_keys is not None:
+            self._passthrough_keys: frozenset[int] = frozenset(passthrough_keys)
+        else:
+            self._passthrough_keys = DEFAULT_PASSTHROUGH_KEYS
         self._on_toggle: Callable[[bool], None] | None = on_toggle
 
         # Public observable state (written only on hook thread)
@@ -247,6 +249,7 @@ class InputHooks:
         self._orig_sigint: signal._HANDLER = signal.SIG_DFL
         self._orig_sigterm: signal._HANDLER = signal.SIG_DFL
         self._orig_excepthook = sys.excepthook
+        self._orig_threading_excepthook = threading.excepthook
 
     # ── Properties ───────────────────────────────────────────────────────
 
@@ -307,6 +310,8 @@ class InputHooks:
             if self._running:
                 return
             self._running = True
+
+        _enable_per_monitor_dpi_awareness()
 
         self._ready.clear()
         self._thread = threading.Thread(
@@ -643,8 +648,9 @@ class InputHooks:
             signal.signal(signal.SIGINT, _sig_handler)
             signal.signal(signal.SIGTERM, _sig_handler)
 
-        # sys.excepthook
+        # sys.excepthook and threading.excepthook
         self._orig_excepthook = sys.excepthook
+        self._orig_threading_excepthook = threading.excepthook
 
         def _excepthook(
             etype: type[BaseException],
@@ -654,10 +660,15 @@ class InputHooks:
             self.stop()
             self._orig_excepthook(etype, val, tb)
 
+        def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
+            self.stop()
+            self._orig_threading_excepthook(args)
+
         sys.excepthook = _excepthook
+        threading.excepthook = _thread_excepthook
 
     def _restore_failsafes(self) -> None:
-        """Restore original console handler, signal handlers, and excepthook."""
+        """Restore original console handler, signal handlers, and excepthooks."""
         if self._console_ctrl_routine is not None:
             with contextlib.suppress(Exception):
                 _kernel32.SetConsoleCtrlHandler(self._console_ctrl_routine, False)
@@ -671,6 +682,8 @@ class InputHooks:
                 pass
         with contextlib.suppress(Exception):
             sys.excepthook = self._orig_excepthook
+        with contextlib.suppress(Exception):
+            threading.excepthook = self._orig_threading_excepthook
 
 
 # ── Class Alias ──────────────────────────────────────────────────────────

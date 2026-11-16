@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -123,6 +125,11 @@ _XUSB_BUTTON_MAP: dict[str, vg.XUSB_BUTTON] = {
 }
 
 INV_SQRT2: float = 1.0 / math.sqrt(2.0)
+
+
+def _reject_non_finite(val: str) -> None:
+    """Reject non-finite JSON constants (NaN, Infinity, -Infinity) for security."""
+    raise ValueError(f"Non-finite JSON constant rejected for security: {val!r}")
 
 
 # ── Parsing Helpers ──────────────────────────────────────────────────────
@@ -412,7 +419,7 @@ class ProfileManager:
 
         loaded: list[Profile] = []
         for p in json_files:
-            profile = self.load_profile(p)
+            profile = self.load_profile(p, base_dir=self.profiles_dir)
             loaded.append(profile)
 
         self.profiles = loaded
@@ -430,36 +437,70 @@ class ProfileManager:
             self.current_index = 0
 
     @staticmethod
-    def load_profile(path: Path) -> Profile:
+    def load_profile(path: Path, base_dir: Path | None = None) -> Profile:
         """Load and validate a single profile from a JSON file.
 
-        Hardened for enterprise security: rejects symlinks and files > 64 KB.
+        Hardened against TOCTOU race conditions, symlink bypasses, path
+        traversals, and non-finite numeric injection.
         """
-        # Security checks
-        if path.is_symlink():
+        resolved_path = path.resolve()
+
+        # Security check: explicit symlink rejection
+        if path.is_symlink() or resolved_path.is_symlink():
             raise ValueError(f"Symlinks are rejected for security reasons: {path}")
 
+        # Enforce path containment when base_dir is supplied
+        if base_dir is not None:
+            resolved_base = base_dir.resolve()
+            if not resolved_path.is_relative_to(resolved_base):
+                raise ValueError(
+                    f"Path containment violation: {resolved_path} is outside base directory {resolved_base}"
+                )
+
+        # Open file descriptor first to eliminate TOCTOU window
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+
         try:
-            stat_result = path.stat()
+            fd = os.open(str(resolved_path), flags)
         except OSError as err:
-            raise ValueError(f"Unable to read file metadata for {path}: {err}") from err
+            raise ValueError(f"Unable to open profile {resolved_path}: {err}") from err
 
-        if stat_result.st_size > 65536:
-            raise ValueError(
-                f"Profile file {path} exceeds maximum permitted size of 64 KB ({stat_result.st_size} bytes)."
-            )
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError(f"Profile path is not a regular file: {resolved_path}")
+            if st.st_size > 65536:
+                raise ValueError(
+                    f"Profile file {resolved_path} exceeds maximum permitted size of 64 KB ({st.st_size} bytes)."
+                )
 
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+            with os.fdopen(fd, "r", encoding="utf-8") as f:
+                raw_text = f.read(65537)
+                if len(raw_text) > 65536:
+                    raise ValueError(
+                        f"Profile file {resolved_path} exceeds maximum permitted size of 64 KB."
+                    )
+            fd = -1  # os.fdopen took ownership and closed the descriptor
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+        # Reject non-finite constants (NaN, Infinity, -Infinity)
+        try:
+            data = json.loads(raw_text, parse_constant=_reject_non_finite)
+        except Exception as err:
+            raise ValueError(f"Invalid JSON in profile {resolved_path}: {err}") from err
 
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
-            raise ValueError(f"Profile {path} missing valid 'name' string.")
+            raise ValueError(f"Profile {resolved_path} missing valid 'name' string.")
 
         # ── Stick config ──
         raw_stick = data.get("stick_config")
         if not isinstance(raw_stick, dict):
-            raise ValueError(f"Profile {path} missing 'stick_config' object.")
+            raise ValueError(f"Profile {resolved_path} missing 'stick_config' object.")
 
         try:
             sensitivity = float(raw_stick["sensitivity"])
@@ -468,14 +509,27 @@ class ProfileManager:
             decay_rate = float(raw_stick["decay_rate"])
             smoothing_alpha = float(raw_stick["smoothing_alpha"])
         except (KeyError, TypeError, ValueError) as err:
-            raise ValueError(f"Profile {path} invalid 'stick_config': {err}") from err
+            raise ValueError(f"Profile {resolved_path} invalid 'stick_config': {err}") from err
+
+        # Verify finite numbers
+        for num_val, num_name in [
+            (sensitivity, "sensitivity"),
+            (curve_exponent, "curve_exponent"),
+            (deadzone_comp, "deadzone_comp"),
+            (decay_rate, "decay_rate"),
+            (smoothing_alpha, "smoothing_alpha"),
+        ]:
+            if not math.isfinite(num_val):
+                raise ValueError(
+                    f"Profile {resolved_path}: '{num_name}' must be a finite number, got {num_val}."
+                )
 
         # Explicit type check for invert_y to avoid bool("false") == True pitfall
         if "invert_y" in raw_stick:
             raw_inv = raw_stick["invert_y"]
             if not isinstance(raw_inv, bool):
                 raise ValueError(
-                    f"Profile {path}: 'invert_y' must be a boolean (true/false), got {type(raw_inv).__name__}."
+                    f"Profile {resolved_path}: 'invert_y' must be a boolean (true/false), got {type(raw_inv).__name__}."
                 )
             invert_y = raw_inv
         else:

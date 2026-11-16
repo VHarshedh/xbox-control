@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import ctypes
 import math
+import os
 import sys
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 # ── Module constants ─────────────────────────────────────────────────────
 
@@ -28,13 +30,27 @@ _I16_POS: int = 32_767                       #  max  int16
 _I16_NEG: int = 32_768                       # |min| int16
 
 
-# ── Win32 high-resolution timing ────────────────────────────────────────
+# ── Win32 high-resolution timing (Hardened DLL loading) ─────────────────
 
-_winmm = ctypes.windll.winmm
+def _load_winmm() -> ctypes.WinDLL:
+    """Load winmm.dll strictly from System32 to mitigate DLL side-loading (CWE-427)."""
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    winmm_path = Path(system_root) / "System32" / "winmm.dll"
+
+    # LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800
+    try:
+        return ctypes.WinDLL(str(winmm_path), winmode=0x00000800)
+    except TypeError:
+        return ctypes.WinDLL(str(winmm_path))
+    except Exception:
+        return ctypes.windll.winmm  # type: ignore[attr-defined]
+
+
+_winmm = _load_winmm()
 _winmm.timeBeginPeriod.argtypes = [ctypes.c_uint]
-_winmm.timeBeginPeriod.restype  = ctypes.c_uint
-_winmm.timeEndPeriod.argtypes   = [ctypes.c_uint]
-_winmm.timeEndPeriod.restype    = ctypes.c_uint
+_winmm.timeBeginPeriod.restype = ctypes.c_uint
+_winmm.timeEndPeriod.argtypes = [ctypes.c_uint]
+_winmm.timeEndPeriod.restype = ctypes.c_uint
 
 
 # ── HighResTimer ─────────────────────────────────────────────────────────
