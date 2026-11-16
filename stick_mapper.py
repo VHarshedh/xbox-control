@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import ctypes
 import math
-import os
 import sys
 import time
 from collections.abc import Callable
@@ -32,18 +31,31 @@ _I16_NEG: int = 32_768                       # |min| int16
 
 # ── Win32 high-resolution timing (Hardened DLL loading) ─────────────────
 
-def _load_winmm() -> ctypes.WinDLL:
-    """Load winmm.dll strictly from System32 to mitigate DLL side-loading (CWE-427)."""
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
-    winmm_path = Path(system_root) / "System32" / "winmm.dll"
+def _get_system_directory() -> Path:
+    """Resolve the true Windows System32 directory via kernel32 API (CWE-426)."""
+    try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        buf = ctypes.create_unicode_buffer(260)
+        kernel32.GetSystemDirectoryW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+        kernel32.GetSystemDirectoryW.restype = ctypes.c_uint
+        n = kernel32.GetSystemDirectoryW(buf, 260)
+        if 0 < n <= 260:
+            return Path(buf.value)
+    except Exception:
+        pass
+    return Path(r"C:\Windows\System32")
 
+
+def _load_winmm() -> ctypes.WinDLL:
+    """Load winmm.dll strictly from System32 using LOAD_LIBRARY_SEARCH_SYSTEM32 (CWE-426)."""
     # LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800
     try:
-        return ctypes.WinDLL(str(winmm_path), winmode=0x00000800)
+        return ctypes.WinDLL("winmm.dll", winmode=0x00000800)
     except TypeError:
-        return ctypes.WinDLL(str(winmm_path))
-    except Exception:
-        return ctypes.windll.winmm  # type: ignore[attr-defined]
+        sys_dir = _get_system_directory()
+        return ctypes.WinDLL(str(sys_dir / "winmm.dll"))
+    except Exception as exc:
+        raise RuntimeError(f"Failed to securely load winmm.dll from System32: {exc}") from exc
 
 
 _winmm = _load_winmm()

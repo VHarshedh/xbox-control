@@ -49,6 +49,7 @@ VK_RWIN: int = 0x5C
 DEFAULT_PASSTHROUGH_KEYS: frozenset[int] = frozenset({VK_LWIN, VK_RWIN})
 
 LLMHF_INJECTED: int = 0x01
+LLKHF_INJECTED: int = 0x10
 XBUTTON1: int = 0x0001
 XBUTTON2: int = 0x0002
 
@@ -436,56 +437,58 @@ class InputHooks:
                 lParam, ctypes.POINTER(KBDLLHOOKSTRUCT),
             ).contents
             vk: int = kbd.vkCode
+            is_injected = bool(kbd.flags & LLKHF_INJECTED)
 
             # ── Toggle key (F8) ──
             if vk == self._toggle_vk:
-                if wParam in _KEY_DOWN_MSGS and not self._f8_held:
-                    self._f8_held = True
-                    new_active = not self._active
+                if not is_injected:
+                    if wParam in _KEY_DOWN_MSGS and not self._f8_held:
+                        self._f8_held = True
+                        new_active = not self._active
 
-                    if new_active:
-                        # Center cursor *before* activating capture
-                        cx = _user32.GetSystemMetrics(0) // 2
-                        cy = _user32.GetSystemMetrics(1) // 2
-                        _user32.SetCursorPos(cx, cy)
+                        if new_active:
+                            # Center cursor *before* activating capture
+                            cx = _user32.GetSystemMetrics(0) // 2
+                            cy = _user32.GetSystemMetrics(1) // 2
+                            _user32.SetCursorPos(cx, cy)
 
-                        # Read actual landed cursor coordinate
-                        landed = wt.POINT()
-                        if _user32.GetCursorPos(ctypes.byref(landed)):
-                            actual_pt = (landed.x, landed.y)
+                            # Read actual landed cursor coordinate
+                            landed = wt.POINT()
+                            if _user32.GetCursorPos(ctypes.byref(landed)):
+                                actual_pt = (landed.x, landed.y)
+                            else:
+                                actual_pt = (cx, cy)
+
+                            with self._mouse_lock:
+                                self._last_pt = actual_pt
+                                self._dx = self._dy = 0
+                                self._lbutton = False
+                                self._rbutton = False
+                                self._mbutton = False
+                                self._xbutton1 = False
+                                self._xbutton2 = False
+                                self._wheel_delta = 0
+                            with self._keys_lock:
+                                self._keys_down.clear()
+
+                            self._active = True
                         else:
-                            actual_pt = (cx, cy)
+                            self._active = False
+                            with self._keys_lock:
+                                self._keys_down.clear()
+                            with self._mouse_lock:
+                                self._last_pt = None
+                                self._lbutton = False
+                                self._rbutton = False
+                                self._mbutton = False
+                                self._xbutton1 = False
+                                self._xbutton2 = False
 
-                        with self._mouse_lock:
-                            self._last_pt = actual_pt
-                            self._dx = self._dy = 0
-                            self._lbutton = False
-                            self._rbutton = False
-                            self._mbutton = False
-                            self._xbutton1 = False
-                            self._xbutton2 = False
-                            self._wheel_delta = 0
-                        with self._keys_lock:
-                            self._keys_down.clear()
+                        if self._on_toggle is not None:
+                            self._on_toggle(new_active)
 
-                        self._active = True
-                    else:
-                        self._active = False
-                        with self._keys_lock:
-                            self._keys_down.clear()
-                        with self._mouse_lock:
-                            self._last_pt = None
-                            self._lbutton = False
-                            self._rbutton = False
-                            self._mbutton = False
-                            self._xbutton1 = False
-                            self._xbutton2 = False
-
-                    if self._on_toggle is not None:
-                        self._on_toggle(new_active)
-
-                elif wParam in _KEY_UP_MSGS:
-                    self._f8_held = False
+                    elif wParam in _KEY_UP_MSGS:
+                        self._f8_held = False
 
                 # NEVER swallow the toggle key
                 return int(_user32.CallNextHookEx(
@@ -494,12 +497,13 @@ class InputHooks:
 
             # ── Profile cycle hotkey (F9) ──
             if vk == VK_F9:
-                if wParam in _KEY_DOWN_MSGS and not self._f9_held:
-                    self._f9_held = True
-                    with self._keys_lock:
-                        self._profile_cycle_requested = True
-                elif wParam in _KEY_UP_MSGS:
-                    self._f9_held = False
+                if not is_injected:
+                    if wParam in _KEY_DOWN_MSGS and not self._f9_held:
+                        self._f9_held = True
+                        with self._keys_lock:
+                            self._profile_cycle_requested = True
+                    elif wParam in _KEY_UP_MSGS:
+                        self._f9_held = False
 
                 # When active, swallow F9 so game UI never sees it
                 if self._active:

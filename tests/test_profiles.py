@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -42,6 +43,23 @@ class TestVKParsing:
 
         with pytest.raises(ValueError, match="VK code out of byte range"):
             parse_vk(300)
+
+    def test_parse_vk_booleans_rejected(self) -> None:
+        with pytest.raises(ValueError, match="Boolean values cannot be used"):
+            parse_vk(True)
+
+        with pytest.raises(ValueError, match="Boolean values cannot be used"):
+            parse_vk(False)
+
+    def test_parse_vk_string_out_of_range(self) -> None:
+        with pytest.raises(ValueError, match="VK code out of byte range"):
+            parse_vk("999")
+
+        with pytest.raises(ValueError, match="VK code out of byte range"):
+            parse_vk("0x1FF")
+
+        with pytest.raises(ValueError, match="VK code out of byte range"):
+            parse_vk("0xFFFF")
 
 
 class TestTargetParsing:
@@ -175,6 +193,56 @@ class TestProfileSecurityAndValidation:
 
         with pytest.raises(ValueError, match="Path containment violation"):
             ProfileManager.load_profile(outside_file, base_dir=base_dir)
+
+    def test_non_string_button_target_rejection(self, tmp_path: Path) -> None:
+        bad_btn = tmp_path / "bad_button.json"
+        data = {
+            "name": "Bad Button",
+            "stick_config": {
+                "sensitivity": 0.05,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {"VK_SPACE": 123},  # Non-string target must be rejected
+        }
+        bad_btn.write_text(json.dumps(data), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Button mapping target must be a string"):
+            ProfileManager.load_profile(bad_btn)
+
+    def test_reparse_point_rejection(self, tmp_path: Path) -> None:
+        dummy = tmp_path / "normal.json"
+        data = {
+            "name": "Normal",
+            "stick_config": {
+                "sensitivity": 0.05,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {},
+        }
+        dummy.write_text(json.dumps(data), encoding="utf-8")
+
+        orig_fstat = os.fstat
+
+        def mock_fstat(fd: int) -> MagicMock:
+            real_st = orig_fstat(fd)
+            mock_st = MagicMock(spec=real_st)
+            mock_st.st_mode = real_st.st_mode
+            mock_st.st_size = real_st.st_size
+            mock_st.st_file_attributes = getattr(real_st, "st_file_attributes", 0) | 0x0400
+            return mock_st
+
+        with patch("os.fstat", side_effect=mock_fstat), pytest.raises(
+            ValueError, match="Reparse points and junctions are rejected"
+        ):
+            ProfileManager.load_profile(dummy)
 
 
 class TestWASDNormalization:

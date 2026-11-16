@@ -9,7 +9,6 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import ctypes.wintypes as wt
-import os
 import platform
 import subprocess
 import sys
@@ -43,6 +42,21 @@ def check_windows_os() -> tuple[bool, str]:
     if os_name == "Windows":
         return True, f"OS: Windows {platform.version()}"
     return False, f"Unsupported OS '{os_name}'. This script requires Windows."
+
+
+def _get_system_directory() -> Path:
+    """Resolve the true 64-bit Windows System32 directory via kernel32 API (CWE-426)."""
+    try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        buf = ctypes.create_unicode_buffer(260)
+        kernel32.GetSystemDirectoryW.argtypes = [wt.LPWSTR, wt.UINT]
+        kernel32.GetSystemDirectoryW.restype = wt.UINT
+        n = kernel32.GetSystemDirectoryW(buf, 260)
+        if 0 < n <= 260:
+            return Path(buf.value)
+    except Exception:
+        pass
+    return Path(r"C:\Windows\System32")
 
 
 def check_vigembus_service() -> tuple[bool, str]:
@@ -116,7 +130,7 @@ def check_vigembus_service() -> tuple[bool, str]:
 
     # --- Attempt 2: `sc.exe query` (Fallback - Hardened against CWE-426/427) ---
     try:
-        sc_path = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "sc.exe"
+        sc_path = _get_system_directory() / "sc.exe"
         if not sc_path.is_file():
             return False, _vigembus_install_message()
 

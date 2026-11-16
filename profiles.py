@@ -136,6 +136,9 @@ def _reject_non_finite(val: str) -> None:
 
 def parse_vk(val: int | str) -> int:
     """Resolve a virtual-key identifier (integer or name string) to a VK code."""
+    if isinstance(val, bool):
+        raise ValueError(f"Boolean values cannot be used as virtual-key codes: {val!r}")
+
     if isinstance(val, int):
         if not (0 <= val <= 255):
             raise ValueError(f"VK code out of byte range [0, 255]: {val}")
@@ -143,9 +146,19 @@ def parse_vk(val: int | str) -> int:
 
     s = str(val).strip()
     if s.isdigit():
-        return int(s)
-    if s.startswith("0x") or s.startswith("0X"):
-        return int(s, 16)
+        code = int(s)
+        if not (0 <= code <= 255):
+            raise ValueError(f"VK code out of byte range [0, 255]: {val!r}")
+        return code
+
+    if s.startswith(("0x", "0X")):
+        try:
+            code = int(s, 16)
+        except ValueError as err:
+            raise ValueError(f"Invalid hexadecimal VK code: {val!r}") from err
+        if not (0 <= code <= 255):
+            raise ValueError(f"VK code out of byte range [0, 255]: {val!r}")
+        return code
 
     upper = s.upper()
     if upper in _VK_NAME_MAP:
@@ -249,6 +262,15 @@ class Profile:
 
     def _parse_buttons(self, raw_buttons: dict[str, str]) -> None:
         for src_str, tgt_str in raw_buttons.items():
+            if not isinstance(src_str, str):
+                raise ValueError(
+                    f"Button mapping source must be a string, got {type(src_str).__name__}: {src_str!r}"
+                )
+            if not isinstance(tgt_str, str):
+                raise ValueError(
+                    f"Button mapping target must be a string, got {type(tgt_str).__name__}: {tgt_str!r}"
+                )
+
             tgt = parse_target(tgt_str)
             if tgt == "LT":
                 self._uses_lt = True
@@ -471,6 +493,15 @@ class ProfileManager:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
                 raise ValueError(f"Profile path is not a regular file: {resolved_path}")
+
+            # On Windows, reject NTFS junctions and reparse points
+            file_attrs = getattr(st, "st_file_attributes", 0)
+            reparse_point_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+            if file_attrs & reparse_point_flag:
+                raise ValueError(
+                    f"Reparse points and junctions are rejected for security: {resolved_path}"
+                )
+
             if st.st_size > 65536:
                 raise ValueError(
                     f"Profile file {resolved_path} exceeds maximum permitted size of 64 KB ({st.st_size} bytes)."
