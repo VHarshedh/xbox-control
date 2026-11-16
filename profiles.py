@@ -7,12 +7,15 @@ and manages profile cycling at runtime.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import stat
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import vgamepad as vg
 
@@ -24,12 +27,22 @@ VK_F9: int = 0x78
 
 # Map string names to Win32 Virtual-Key codes
 _VK_NAME_MAP: dict[str, int] = {
-    # Mouse buttons (tokens used in profile JSON)
+    # Mouse buttons (tokens used in profile JSON and Win32 aliases)
     "MOUSE_LEFT": 0x01,
     "MOUSE_RIGHT": 0x02,
     "MOUSE_MIDDLE": 0x04,
     "MOUSE_X1": 0x05,
     "MOUSE_X2": 0x06,
+    "VK_LBUTTON": 0x01,
+    "VK_RBUTTON": 0x02,
+    "VK_MBUTTON": 0x04,
+    "VK_XBUTTON1": 0x05,
+    "VK_XBUTTON2": 0x06,
+    "LBUTTON": 0x01,
+    "RBUTTON": 0x02,
+    "MBUTTON": 0x04,
+    "XBUTTON1": 0x05,
+    "XBUTTON2": 0x06,
     # Standard control keys
     "VK_BACK": 0x08,
     "VK_TAB": 0x09,
@@ -92,25 +105,33 @@ for f in range(1, 25):
 _XUSB_BUTTON_MAP: dict[str, vg.XUSB_BUTTON] = {
     "XUSB_GAMEPAD_DPAD_UP": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,
     "DPAD_UP": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,
+    "DPADUP": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,
     "XUSB_GAMEPAD_DPAD_DOWN": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,
     "DPAD_DOWN": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,
+    "DPADDOWN": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,
     "XUSB_GAMEPAD_DPAD_LEFT": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,
     "DPAD_LEFT": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,
+    "DPADLEFT": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,
     "XUSB_GAMEPAD_DPAD_RIGHT": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT,
     "DPAD_RIGHT": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT,
+    "DPADRIGHT": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT,
     "XUSB_GAMEPAD_START": vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
     "START": vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
     "XUSB_GAMEPAD_BACK": vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK,
     "BACK": vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK,
     "XUSB_GAMEPAD_LEFT_THUMB": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB,
+    "LEFT_THUMB": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB,
     "LS": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB,
     "L3": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB,
     "XUSB_GAMEPAD_RIGHT_THUMB": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB,
+    "RIGHT_THUMB": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB,
     "RS": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB,
     "R3": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB,
     "XUSB_GAMEPAD_LEFT_SHOULDER": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER,
+    "LEFT_SHOULDER": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER,
     "LB": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER,
     "XUSB_GAMEPAD_RIGHT_SHOULDER": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
+    "RIGHT_SHOULDER": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
     "RB": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
     "XUSB_GAMEPAD_GUIDE": vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE,
     "GUIDE": vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE,
@@ -124,12 +145,52 @@ _XUSB_BUTTON_MAP: dict[str, vg.XUSB_BUTTON] = {
     "Y": vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
 }
 
+_RESERVED_DEVICE_NAMES: frozenset[str] = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+_UNSUPPORTED_CONTROLLER_TOKENS: frozenset[str] = frozenset({
+    "CROSS",
+    "CIRCLE",
+    "TRIANGLE",
+    "SQUARE",
+    "L1",
+    "R1",
+    "L2",
+    "R2",
+    "SHARE",
+    "OPTIONS",
+    "TOUCHPAD",
+    "DS4_BUTTON_CROSS",
+    "DS4_BUTTON_CIRCLE",
+    "DS4_BUTTON_TRIANGLE",
+    "DS4_BUTTON_SQUARE",
+    "DS4_BUTTON_SHOULDER_LEFT",
+    "DS4_BUTTON_SHOULDER_RIGHT",
+    "DS4_BUTTON_TRIGGER_LEFT",
+    "DS4_BUTTON_TRIGGER_RIGHT",
+    "DS4_BUTTON_SHARE",
+    "DS4_BUTTON_OPTIONS",
+})
+
 INV_SQRT2: float = 1.0 / math.sqrt(2.0)
 
 
 def _reject_non_finite(val: str) -> None:
     """Reject non-finite JSON constants (NaN, Infinity, -Infinity) for security."""
     raise ValueError(f"Non-finite JSON constant rejected for security: {val!r}")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject JSON objects containing duplicate keys (preventing parser ambiguity / schema injection)."""
+    d: dict[str, Any] = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError(f"Duplicate key in JSON object: {k!r}")
+        d[k] = v
+    return d
 
 
 # ── Parsing Helpers ──────────────────────────────────────────────────────
@@ -139,12 +200,20 @@ def parse_vk(val: int | str) -> int:
     if isinstance(val, bool):
         raise ValueError(f"Boolean values cannot be used as virtual-key codes: {val!r}")
 
+    if not isinstance(val, (int, str)):
+        raise ValueError(
+            f"Virtual-key identifier must be an int or str, got {type(val).__name__}: {val!r}"
+        )
+
     if isinstance(val, int):
         if not (0 <= val <= 255):
             raise ValueError(f"VK code out of byte range [0, 255]: {val}")
         return val
 
-    s = str(val).strip()
+    s = val.strip()
+    if not s:
+        raise ValueError("Virtual-key identifier cannot be empty or whitespace.")
+
     if s.isdigit():
         code = int(s)
         if not (0 <= code <= 255):
@@ -167,17 +236,136 @@ def parse_vk(val: int | str) -> int:
     raise ValueError(f"Unknown virtual-key name: {val!r}")
 
 
-def parse_target(target_str: str) -> str | vg.XUSB_BUTTON:
-    """Parse a gamepad target string into either a trigger token or XUSB_BUTTON."""
-    t = target_str.strip().upper()
-    if t in ("LT", "LEFT_TRIGGER"):
+def parse_target(target: str | vg.XUSB_BUTTON) -> str | vg.XUSB_BUTTON:
+    """Parse a gamepad target string or enum into either a trigger token or XUSB_BUTTON."""
+    if isinstance(target, vg.XUSB_BUTTON):
+        return target
+
+    if isinstance(target, Enum):
+        raise ValueError(
+            f"Unsupported gamepad enum {type(target).__name__}.{target.name}: "
+            "only Xbox 360 (XUSB) controls are supported."
+        )
+
+    if not isinstance(target, str):
+        raise ValueError(
+            f"Button mapping target must be a string, got {type(target).__name__}: {target!r}"
+        )
+
+    t = target.strip().upper()
+    if not t:
+        raise ValueError("Controller target button or trigger cannot be empty.")
+
+    # Triggers
+    if t in ("LT", "LEFT_TRIGGER", "TRIGGER_LEFT", "L_TRIGGER", "LTRIGGER"):
         return "LT"
-    if t in ("RT", "RIGHT_TRIGGER"):
+    if t in ("RT", "RIGHT_TRIGGER", "TRIGGER_RIGHT", "R_TRIGGER", "RTRIGGER"):
         return "RT"
+
+    # Explicit check for unknown triggers
+    if "TRIGGER" in t:
+        raise ValueError(f"Unknown controller trigger target: {target!r}")
+
+    # Check XUSB button map
     if t in _XUSB_BUTTON_MAP:
         return _XUSB_BUTTON_MAP[t]
 
-    raise ValueError(f"Unknown controller target button or trigger: {target_str!r}")
+    # Explicit check for known PlayStation / unsupported buttons
+    if t in _UNSUPPORTED_CONTROLLER_TOKENS:
+        raise ValueError(
+            f"Unsupported gamepad button {target!r}: PlayStation controls are not supported on Xbox 360."
+        )
+
+    raise ValueError(f"Unknown controller target button or trigger: {target!r}")
+
+
+def validate_profile_path(path: Path, base_dir: Path | None = None) -> Path:
+    """Validate a profile path against traversal, DOS devices, ADS, UNC, and symlinks.
+
+    Returns the canonical resolved Path.
+    """
+    raw_str = str(path)
+
+    # 1. Extended UNC / NT device paths (\\?\, \\.\)
+    if raw_str.startswith(("\\\\?\\", "\\\\.\\", "//?/", "//./")):
+        raise ValueError(f"Extended UNC/device paths are rejected for security: {path}")
+
+    # 2. NTFS Alternate Data Streams (colon in path beyond drive letter)
+    if len(raw_str) >= 2 and raw_str[0].isalpha() and raw_str[1] == ":":
+        remainder = raw_str[2:]
+    else:
+        remainder = raw_str
+    if ":" in remainder:
+        raise ValueError(f"NTFS Alternate Data Streams (colon in path) are rejected: {path}")
+
+    # 3. Windows DOS reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    for part in path.parts:
+        p_clean = part
+        if len(p_clean) >= 2 and p_clean[0].isalpha() and p_clean[1] == ":":
+            p_clean = p_clean[2:].lstrip("\\/")
+        if not p_clean:
+            continue
+        base_name = p_clean.split(".")[0].split(":")[0].strip().upper()
+        if base_name in _RESERVED_DEVICE_NAMES:
+            raise ValueError(f"Windows reserved device name rejected: {path}")
+
+    # 4. Resolve path
+    try:
+        resolved_path = path.resolve()
+    except OSError as err:
+        raise ValueError(f"Unable to resolve profile path {path}: {err}") from err
+
+    resolved_str = str(resolved_path)
+    if resolved_str.startswith(("\\\\?\\", "\\\\.\\", "//?/", "//./")):
+        raise ValueError(f"Extended UNC/device paths are rejected for security: {resolved_path}")
+
+    if len(resolved_str) >= 2 and resolved_str[0].isalpha() and resolved_str[1] == ":":
+        res_remainder = resolved_str[2:]
+    else:
+        res_remainder = resolved_str
+    if ":" in res_remainder:
+        raise ValueError(f"NTFS Alternate Data Streams (colon in path) are rejected: {resolved_path}")
+
+    for part in resolved_path.parts:
+        p_clean = part
+        if len(p_clean) >= 2 and p_clean[0].isalpha() and p_clean[1] == ":":
+            p_clean = p_clean[2:].lstrip("\\/")
+        if not p_clean:
+            continue
+        base_name = p_clean.split(".")[0].split(":")[0].strip().upper()
+        if base_name in _RESERVED_DEVICE_NAMES:
+            raise ValueError(f"Windows reserved device name rejected: {resolved_path}")
+
+    # 5. Symlinks rejection (on unresolved path and resolved path)
+    if path.is_symlink() or resolved_path.is_symlink():
+        raise ValueError(f"Symlinks are rejected for security reasons: {path}")
+
+    # Inspect lstat attributes for symlinks and reparse points
+    try:
+        lst: os.stat_result | None = path.lstat()
+    except OSError:
+        lst = None
+
+    if lst is not None:
+        if stat.S_ISLNK(lst.st_mode):
+            raise ValueError(f"Symlinks are rejected for security reasons: {path}")
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+        if getattr(lst, "st_file_attributes", 0) & reparse_flag:
+            raise ValueError(f"Reparse points and junctions are rejected for security: {path}")
+
+    # 6. Path containment when base_dir is supplied
+    if base_dir is not None:
+        try:
+            resolved_base = base_dir.resolve()
+        except OSError as err:
+            raise ValueError(f"Unable to resolve base directory {base_dir}: {err}") from err
+
+        if not resolved_path.is_relative_to(resolved_base):
+            raise ValueError(
+                f"Path containment violation: {resolved_path} is outside base directory {resolved_base}"
+            )
+
+    return resolved_path
 
 
 # ── Data Classes ─────────────────────────────────────────────────────────
@@ -280,26 +468,36 @@ class Profile:
                 self._all_buttons.add(tgt)
 
             upper_src = src_str.strip().upper()
-            if upper_src in ("MOUSE_LEFT", "LBUTTON"):
-                self._mouse_targets["left"].append(tgt)
-            elif upper_src in ("MOUSE_RIGHT", "RBUTTON"):
-                self._mouse_targets["right"].append(tgt)
-            elif upper_src in ("MOUSE_MIDDLE", "MBUTTON"):
-                self._mouse_targets["middle"].append(tgt)
-            elif upper_src in ("MOUSE_X1", "XBUTTON1"):
-                self._mouse_targets["x1"].append(tgt)
-            elif upper_src in ("MOUSE_X2", "XBUTTON2"):
-                self._mouse_targets["x2"].append(tgt)
+            if upper_src in ("MOUSE_LEFT", "LBUTTON", "VK_LBUTTON"):
+                if tgt not in self._mouse_targets["left"]:
+                    self._mouse_targets["left"].append(tgt)
+            elif upper_src in ("MOUSE_RIGHT", "RBUTTON", "VK_RBUTTON"):
+                if tgt not in self._mouse_targets["right"]:
+                    self._mouse_targets["right"].append(tgt)
+            elif upper_src in ("MOUSE_MIDDLE", "MBUTTON", "VK_MBUTTON"):
+                if tgt not in self._mouse_targets["middle"]:
+                    self._mouse_targets["middle"].append(tgt)
+            elif upper_src in ("MOUSE_X1", "XBUTTON1", "VK_XBUTTON1"):
+                if tgt not in self._mouse_targets["x1"]:
+                    self._mouse_targets["x1"].append(tgt)
+            elif upper_src in ("MOUSE_X2", "XBUTTON2", "VK_XBUTTON2"):
+                if tgt not in self._mouse_targets["x2"]:
+                    self._mouse_targets["x2"].append(tgt)
             else:
                 vk = parse_vk(src_str)
-                self._key_targets.setdefault(vk, []).append(tgt)
+                targets = self._key_targets.setdefault(vk, [])
+                if tgt not in targets:
+                    targets.append(tgt)
 
-    def compute_left_stick(self, keys_pressed: frozenset[int]) -> tuple[int, int]:
+    def compute_left_stick(self, keys_pressed: frozenset[int] | set[int] | None) -> tuple[int, int]:
         """Convert WASD key states into normalized 16-bit left thumbstick integers.
 
         Returns (lx, ly) in [-32768, 32767].
         In XInput, +Y is UP and +X is RIGHT.
         """
+        if keys_pressed is None:
+            return (0, 0)
+
         up = 1 if self.wasd.up in keys_pressed else 0
         down = 1 if self.wasd.down in keys_pressed else 0
         left = 1 if self.wasd.left in keys_pressed else 0
@@ -319,12 +517,14 @@ class Profile:
             lx = 32767 if wx > 0 else (-32768 if wx < 0 else 0)
             ly = 32767 if wy > 0 else (-32768 if wy < 0 else 0)
 
+        lx = max(-32768, min(32767, lx))
+        ly = max(-32768, min(32767, ly))
         return (lx, ly)
 
     def apply_buttons(
         self,
         gamepad: vg.VX360Gamepad,
-        keys_pressed: frozenset[int],
+        keys_pressed: frozenset[int] | set[int] | None,
         lbutton: bool,
         rbutton: bool,
         mbutton: bool,
@@ -335,6 +535,7 @@ class Profile:
         active_buttons: set[vg.XUSB_BUTTON] = set()
         lt_active = False
         rt_active = False
+        keys = keys_pressed if keys_pressed is not None else frozenset()
 
         # ── Mouse button actions ──
         if lbutton:
@@ -384,7 +585,7 @@ class Profile:
 
         # ── Keyboard actions ──
         for vk, targets in self._key_targets.items():
-            if vk in keys_pressed:
+            if vk in keys:
                 for tgt in targets:
                     if tgt == "RT":
                         rt_active = True
@@ -396,8 +597,13 @@ class Profile:
         # ── Commit triggers ──
         if self._uses_lt:
             gamepad.left_trigger(value=255 if lt_active else 0)
+        else:
+            gamepad.left_trigger(value=0)
+
         if self._uses_rt:
             gamepad.right_trigger(value=255 if rt_active else 0)
+        else:
+            gamepad.right_trigger(value=0)
 
         # ── Commit buttons ──
         for btn in self._all_buttons:
@@ -405,6 +611,14 @@ class Profile:
                 gamepad.press_button(button=btn)
             else:
                 gamepad.release_button(button=btn)
+
+    def reset_controls(self, gamepad: vg.VX360Gamepad) -> None:
+        """Release all mapped buttons and triggers on the virtual gamepad."""
+        for btn in self._all_buttons:
+            gamepad.release_button(button=btn)
+        gamepad.left_trigger(value=0)
+        gamepad.right_trigger(value=0)
+        self.mapper.reset()
 
 
 # ── Profile Manager ──────────────────────────────────────────────────────
@@ -435,7 +649,9 @@ class ProfileManager:
         if not self.profiles_dir.is_dir():
             raise FileNotFoundError(f"Profiles directory does not exist: {self.profiles_dir}")
 
-        json_files = sorted(self.profiles_dir.glob("*.json"))
+        validate_profile_path(self.profiles_dir)
+
+        json_files = sorted(p for p in self.profiles_dir.glob("*.json") if p.is_file())
         if not json_files:
             raise FileNotFoundError(f"No .json profile files found in {self.profiles_dir}")
 
@@ -463,24 +679,13 @@ class ProfileManager:
         """Load and validate a single profile from a JSON file.
 
         Hardened against TOCTOU race conditions, symlink bypasses, path
-        traversals, and non-finite numeric injection.
+        traversals, ADS, device names, non-finite numeric injection,
+        and descriptor leaks.
         """
-        resolved_path = path.resolve()
-
-        # Security check: explicit symlink rejection
-        if path.is_symlink() or resolved_path.is_symlink():
-            raise ValueError(f"Symlinks are rejected for security reasons: {path}")
-
-        # Enforce path containment when base_dir is supplied
-        if base_dir is not None:
-            resolved_base = base_dir.resolve()
-            if not resolved_path.is_relative_to(resolved_base):
-                raise ValueError(
-                    f"Path containment violation: {resolved_path} is outside base directory {resolved_base}"
-                )
+        resolved_path = validate_profile_path(path, base_dir=base_dir)
 
         # Open file descriptor first to eliminate TOCTOU window
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY
         if hasattr(os, "O_BINARY"):
             flags |= os.O_BINARY
 
@@ -507,25 +712,58 @@ class ProfileManager:
                     f"Profile file {resolved_path} exceeds maximum permitted size of 64 KB ({st.st_size} bytes)."
                 )
 
-            with os.fdopen(fd, "r", encoding="utf-8") as f:
-                raw_text = f.read(65537)
-                if len(raw_text) > 65536:
-                    raise ValueError(
-                        f"Profile file {resolved_path} exceeds maximum permitted size of 64 KB."
-                    )
-            fd = -1  # os.fdopen took ownership and closed the descriptor
+            # Read bounded chunks directly from fd so descriptor is guaranteed closed before decoding/parsing
+            chunks: list[bytes] = []
+            total_read = 0
+            while total_read <= 65536:
+                chunk = os.read(fd, 65536 - total_read + 1)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total_read += len(chunk)
+
+            if total_read > 65536:
+                raise ValueError(
+                    f"Profile file {resolved_path} exceeds maximum permitted size of 64 KB."
+                )
+            raw_bytes = b"".join(chunks)
         finally:
-            if fd >= 0:
+            with contextlib.suppress(OSError):
                 os.close(fd)
 
-        # Reject non-finite constants (NaN, Infinity, -Infinity)
+        # Decode UTF-8 safely with closed fd
         try:
-            data = json.loads(raw_text, parse_constant=_reject_non_finite)
+            raw_text = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError as err:
+            raise ValueError(
+                f"Profile file {resolved_path} is not valid UTF-8: {err}"
+            ) from err
+
+        # Parse JSON rejecting duplicate keys and non-finite constants
+        try:
+            data = json.loads(
+                raw_text,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_non_finite,
+            )
         except Exception as err:
             raise ValueError(f"Invalid JSON in profile {resolved_path}: {err}") from err
 
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Profile {resolved_path}: Root must be a JSON object, got {type(data).__name__}."
+            )
+
+        # Check unexpected top-level keys
+        allowed_top = {"name", "stick_config", "wasd_left_stick", "buttons"}
+        unexpected_top = set(data.keys()) - allowed_top
+        if unexpected_top:
+            raise ValueError(
+                f"Profile {resolved_path}: Unexpected top-level key(s) in schema: {sorted(unexpected_top)}"
+            )
+
         name = data.get("name")
-        if not isinstance(name, str) or not name.strip():
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 64:
             raise ValueError(f"Profile {resolved_path} missing valid 'name' string.")
 
         # ── Stick config ──
@@ -533,27 +771,32 @@ class ProfileManager:
         if not isinstance(raw_stick, dict):
             raise ValueError(f"Profile {resolved_path} missing 'stick_config' object.")
 
-        try:
-            sensitivity = float(raw_stick["sensitivity"])
-            curve_exponent = float(raw_stick["curve_exponent"])
-            deadzone_comp = float(raw_stick["deadzone_comp"])
-            decay_rate = float(raw_stick["decay_rate"])
-            smoothing_alpha = float(raw_stick["smoothing_alpha"])
-        except (KeyError, TypeError, ValueError) as err:
-            raise ValueError(f"Profile {resolved_path} invalid 'stick_config': {err}") from err
+        allowed_stick_keys = {"sensitivity", "curve_exponent", "deadzone_comp", "decay_rate", "smoothing_alpha", "invert_y"}
+        unexpected_stick = set(raw_stick.keys()) - allowed_stick_keys
+        if unexpected_stick:
+            raise ValueError(
+                f"Profile {resolved_path}: Unexpected key(s) in 'stick_config': {sorted(unexpected_stick)}"
+            )
 
-        # Verify finite numbers
-        for num_val, num_name in [
-            (sensitivity, "sensitivity"),
-            (curve_exponent, "curve_exponent"),
-            (deadzone_comp, "deadzone_comp"),
-            (decay_rate, "decay_rate"),
-            (smoothing_alpha, "smoothing_alpha"),
-        ]:
-            if not math.isfinite(num_val):
+        required_stick_keys = ("sensitivity", "curve_exponent", "deadzone_comp", "decay_rate", "smoothing_alpha")
+        for k in required_stick_keys:
+            if k not in raw_stick:
+                raise ValueError(f"Profile {resolved_path}: Missing required parameter in 'stick_config': '{k}'.")
+            val = raw_stick[k]
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
                 raise ValueError(
-                    f"Profile {resolved_path}: '{num_name}' must be a finite number, got {num_val}."
+                    f"Profile {resolved_path}: '{k}' must be a numeric float/int, got {type(val).__name__}."
                 )
+            if not math.isfinite(float(val)):
+                raise ValueError(
+                    f"Profile {resolved_path}: '{k}' must be a finite number, got {val}."
+                )
+
+        sensitivity = float(raw_stick["sensitivity"])
+        curve_exponent = float(raw_stick["curve_exponent"])
+        deadzone_comp = float(raw_stick["deadzone_comp"])
+        decay_rate = float(raw_stick["decay_rate"])
+        smoothing_alpha = float(raw_stick["smoothing_alpha"])
 
         # Explicit type check for invert_y to avoid bool("false") == True pitfall
         if "invert_y" in raw_stick:
@@ -566,10 +809,10 @@ class ProfileManager:
         else:
             invert_y = False
 
-        if sensitivity <= 0:
-            raise ValueError(f"Profile {path}: sensitivity must be > 0.")
-        if curve_exponent <= 0:
-            raise ValueError(f"Profile {path}: curve_exponent must be > 0.")
+        if sensitivity <= 0 or sensitivity > 100.0:
+            raise ValueError(f"Profile {path}: sensitivity must be > 0 and <= 100.0.")
+        if curve_exponent <= 0 or curve_exponent > 10.0:
+            raise ValueError(f"Profile {path}: curve_exponent must be > 0 and <= 10.0.")
         if not (0.0 <= deadzone_comp <= 0.35):
             raise ValueError(f"Profile {path}: deadzone_comp must be in [0.0, 0.35].")
         if not (0.0 <= decay_rate <= 1.0):
@@ -591,6 +834,17 @@ class ProfileManager:
         if not isinstance(raw_wasd, dict):
             raise ValueError(f"Profile {path} missing 'wasd_left_stick' object.")
 
+        allowed_wasd_keys = {"up", "down", "left", "right"}
+        unexpected_wasd = set(raw_wasd.keys()) - allowed_wasd_keys
+        if unexpected_wasd:
+            raise ValueError(
+                f"Profile {path}: Unexpected key(s) in 'wasd_left_stick': {sorted(unexpected_wasd)}"
+            )
+
+        for dir_key in ("up", "down", "left", "right"):
+            if dir_key not in raw_wasd:
+                raise ValueError(f"Profile {path}: Missing required direction '{dir_key}' in 'wasd_left_stick'.")
+
         try:
             up_vk = parse_vk(raw_wasd["up"])
             down_vk = parse_vk(raw_wasd["down"])
@@ -598,6 +852,12 @@ class ProfileManager:
             right_vk = parse_vk(raw_wasd["right"])
         except (KeyError, ValueError) as err:
             raise ValueError(f"Profile {path} invalid 'wasd_left_stick': {err}") from err
+
+        wasd_vks = [up_vk, down_vk, left_vk, right_vk]
+        if len(set(wasd_vks)) != 4:
+            raise ValueError(
+                f"Profile {path}: Duplicate keys in 'wasd_left_stick': all 4 movement directions must be unique."
+            )
 
         wasd = WASDConfig(up=up_vk, down=down_vk, left=left_vk, right=right_vk)
 

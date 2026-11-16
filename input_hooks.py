@@ -32,13 +32,18 @@ WM_SYSKEYUP: int = 0x0105
 WM_MOUSEMOVE: int = 0x0200
 WM_LBUTTONDOWN: int = 0x0201
 WM_LBUTTONUP: int = 0x0202
+WM_LBUTTONDBLCLK: int = 0x0203
 WM_RBUTTONDOWN: int = 0x0204
 WM_RBUTTONUP: int = 0x0205
+WM_RBUTTONDBLCLK: int = 0x0206
 WM_MBUTTONDOWN: int = 0x0207
 WM_MBUTTONUP: int = 0x0208
+WM_MBUTTONDBLCLK: int = 0x0209
 WM_MOUSEWHEEL: int = 0x020A
 WM_XBUTTONDOWN: int = 0x020B
 WM_XBUTTONUP: int = 0x020C
+WM_XBUTTONDBLCLK: int = 0x020D
+WM_MOUSEHWHEEL: int = 0x020E
 
 WM_QUIT: int = 0x0012
 VK_F8: int = 0x77
@@ -49,17 +54,42 @@ VK_RWIN: int = 0x5C
 DEFAULT_PASSTHROUGH_KEYS: frozenset[int] = frozenset({VK_LWIN, VK_RWIN})
 
 LLMHF_INJECTED: int = 0x01
+LLMHF_LOWER_IL_INJECTED: int = 0x02
+LLMHF_INJECTED_MASK: int = LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED
+
+LLKHF_EXTENDED: int = 0x01
+LLKHF_LOWER_IL_INJECTED: int = 0x02
 LLKHF_INJECTED: int = 0x10
+LLKHF_ALTDOWN: int = 0x20
+LLKHF_UP: int = 0x80
+LLKHF_INJECTED_MASK: int = LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED
+
 XBUTTON1: int = 0x0001
 XBUTTON2: int = 0x0002
+
+CTRL_C_EVENT: int = 0
+CTRL_BREAK_EVENT: int = 1
+CTRL_CLOSE_EVENT: int = 2
+CTRL_LOGOFF_EVENT: int = 5
+CTRL_SHUTDOWN_EVENT: int = 6
+
+SM_CXSCREEN: int = 0
+SM_CYSCREEN: int = 1
+SM_XVIRTUALSCREEN: int = 76
+SM_YVIRTUALSCREEN: int = 77
+SM_CXVIRTUALSCREEN: int = 78
+SM_CYVIRTUALSCREEN: int = 79
 
 _KEY_DOWN_MSGS: frozenset[int] = frozenset({WM_KEYDOWN, WM_SYSKEYDOWN})
 _KEY_UP_MSGS: frozenset[int] = frozenset({WM_KEYUP, WM_SYSKEYUP})
 
 _BTN_DOWN_MAP: dict[int, str] = {
     WM_LBUTTONDOWN: "left",
+    WM_LBUTTONDBLCLK: "left",
     WM_RBUTTONDOWN: "right",
+    WM_RBUTTONDBLCLK: "right",
     WM_MBUTTONDOWN: "middle",
+    WM_MBUTTONDBLCLK: "middle",
 }
 _BTN_UP_MAP: dict[int, str] = {
     WM_LBUTTONUP: "left",
@@ -69,8 +99,12 @@ _BTN_UP_MAP: dict[int, str] = {
 
 # ── Win32 Type Aliases ───────────────────────────────────────────────────
 
-LRESULT: type[ctypes.c_ssize_t] = ctypes.c_ssize_t
-ULONG_PTR: type[ctypes.c_size_t] = ctypes.c_size_t
+if ctypes.sizeof(ctypes.c_void_p) == 8:
+    ULONG_PTR: type[ctypes.c_uint64] = ctypes.c_uint64
+    LRESULT: type[ctypes.c_int64] = ctypes.c_int64
+else:
+    ULONG_PTR: type[ctypes.c_uint32] = ctypes.c_uint32  # type: ignore[no-redef]
+    LRESULT: type[ctypes.c_int32] = ctypes.c_int32      # type: ignore[no-redef]
 
 # LRESULT CALLBACK LowLevelProc(int nCode, WPARAM wParam, LPARAM lParam)
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wt.WPARAM, wt.LPARAM)
@@ -103,6 +137,19 @@ class MSLLHOOKSTRUCT(ctypes.Structure):
         ("time", wt.DWORD),
         ("dwExtraInfo", ULONG_PTR),
     ]
+
+
+# Validate structural alignment and field offsets per Win32 ABI specifications
+if ctypes.sizeof(ctypes.c_void_p) == 8:
+    assert ctypes.sizeof(KBDLLHOOKSTRUCT) == 24, "KBDLLHOOKSTRUCT size mismatch"
+    assert ctypes.sizeof(MSLLHOOKSTRUCT) == 32, "MSLLHOOKSTRUCT size mismatch"
+    assert KBDLLHOOKSTRUCT.dwExtraInfo.offset == 16, "KBDLLHOOKSTRUCT dwExtraInfo offset mismatch"
+    assert MSLLHOOKSTRUCT.dwExtraInfo.offset == 24, "MSLLHOOKSTRUCT dwExtraInfo offset mismatch"
+else:
+    assert ctypes.sizeof(KBDLLHOOKSTRUCT) == 20, "KBDLLHOOKSTRUCT size mismatch"
+    assert ctypes.sizeof(MSLLHOOKSTRUCT) == 24, "MSLLHOOKSTRUCT size mismatch"
+    assert KBDLLHOOKSTRUCT.dwExtraInfo.offset == 16, "KBDLLHOOKSTRUCT dwExtraInfo offset mismatch"
+    assert MSLLHOOKSTRUCT.dwExtraInfo.offset == 20, "MSLLHOOKSTRUCT dwExtraInfo offset mismatch"
 
 
 # ── Win32 Function Prototypes ───────────────────────────────────────────
@@ -156,20 +203,48 @@ _kernel32.GetModuleHandleW.restype = wt.HMODULE
 _kernel32.SetConsoleCtrlHandler.argtypes = [PHANDLER_ROUTINE, wt.BOOL]
 _kernel32.SetConsoleCtrlHandler.restype = wt.BOOL
 
+_kernel32.GetLastError.argtypes = []
+_kernel32.GetLastError.restype = wt.DWORD
+
 
 # ── DPI Awareness Initialization ─────────────────────────────────────────
 
 def _enable_per_monitor_dpi_awareness() -> None:
     """Enable Per-Monitor V2 DPI awareness for pixel-accurate cursor geometry."""
+    ERROR_ACCESS_DENIED = 5
+
+    # 1. Try SetProcessDpiAwarenessContext (Windows 10 1703+)
     try:
         _user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
         _user32.SetProcessDpiAwarenessContext.restype = wt.BOOL
         # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
         if _user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
             return
+        if _kernel32.GetLastError() == ERROR_ACCESS_DENIED:
+            return  # Already set by application manifest or earlier call
+
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE = -3
+        if _user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-3)):
+            return
+        if _kernel32.GetLastError() == ERROR_ACCESS_DENIED:
+            return
     except (AttributeError, OSError):
         pass
 
+    # 2. Try SetProcessDpiAwareness via shcore (Windows 8.1+)
+    try:
+        shcore = ctypes.WinDLL("shcore.dll")
+        shcore.SetProcessDpiAwareness.argtypes = [ctypes.c_int]
+        shcore.SetProcessDpiAwareness.restype = ctypes.c_long  # HRESULT
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2
+        hr = shcore.SetProcessDpiAwareness(2)
+        # S_OK = 0, E_ACCESSDENIED = 0x80070005 (-2147024891)
+        if hr in (0, -2147024891):
+            return
+    except (AttributeError, OSError):
+        pass
+
+    # 3. Fallback to SetProcessDPIAware via user32 (Windows Vista+)
     try:
         _user32.SetProcessDPIAware.argtypes = []
         _user32.SetProcessDPIAware.restype = wt.BOOL
@@ -199,25 +274,28 @@ class InputHooks:
         passthrough_keys: tuple[int, ...] | set[int] | frozenset[int] | None = None,
         on_toggle: Callable[[bool], None] | None = None,
     ) -> None:
-        self._toggle_vk: int = toggle_key
+        self._toggle_vk: int = toggle_key & 0xFF
         if passthrough_keys is not None:
-            self._passthrough_keys: frozenset[int] = frozenset(passthrough_keys)
+            self._passthrough_keys: frozenset[int] = frozenset(k & 0xFF for k in passthrough_keys)
         else:
             self._passthrough_keys = DEFAULT_PASSTHROUGH_KEYS
         self._on_toggle: Callable[[bool], None] | None = on_toggle
 
-        # Public observable state (written only on hook thread)
+        # Unified reentrant state lock for atomic state transitions and consumer reads
+        self._lock = threading.RLock()
+        self._keys_lock = self._lock    # Backwards compatibility alias
+        self._mouse_lock = self._lock   # Backwards compatibility alias
+
+        # Capture and toggle states
         self._active: bool = False
         self._f8_held: bool = False
         self._f9_held: bool = False
         self._profile_cycle_requested: bool = False
 
         # Keyboard: set of currently-pressed virtual-key codes
-        self._keys_lock = threading.Lock()
         self._keys_down: set[int] = set()
 
         # Mouse: accumulated deltas, button states, wheel
-        self._mouse_lock = threading.Lock()
         self._dx: int = 0
         self._dy: int = 0
         self._last_pt: tuple[int, int] | None = None
@@ -236,13 +314,14 @@ class InputHooks:
         self._thread: threading.Thread | None = None
         self._thread_id: int = 0
         self._ready = threading.Event()
+        self._init_error: Exception | None = None
 
-        # Prevent GC of ctypes callback wrappers
+        # Pinned ctypes callback wrappers to prevent GC while installed
         self._kb_proc_ref: Any = HOOKPROC(self._keyboard_ll_proc)
         self._mouse_proc_ref: Any = HOOKPROC(self._mouse_ll_proc)
         self._console_ctrl_routine: Any = None
 
-        # Reentrant cleanup guard to prevent signal-handler self-deadlock
+        # Reentrant cleanup guard to prevent deadlocks and race conditions
         self._cleanup_lock = threading.RLock()
         self._running: bool = False
 
@@ -257,39 +336,40 @@ class InputHooks:
     @property
     def active(self) -> bool:
         """Whether input capture is currently active."""
-        return self._active
+        with self._lock:
+            return self._active
 
     # ── Consumer API (thread-safe) ───────────────────────────────────────
 
     def consume_mouse_delta(self) -> tuple[int, int]:
         """Return accumulated ``(dx, dy)`` since last call, then reset."""
-        with self._mouse_lock:
+        with self._lock:
             dx, dy = self._dx, self._dy
             self._dx = self._dy = 0
-        return dx, dy
+            return dx, dy
 
     def consume_wheel_delta(self) -> int:
         """Return accumulated wheel delta since last call, then reset."""
-        with self._mouse_lock:
+        with self._lock:
             d = self._wheel_delta
             self._wheel_delta = 0
-        return d
+            return d
 
     def consume_profile_cycle(self) -> bool:
         """Atomically check and consume any pending F9 profile cycle request."""
-        with self._keys_lock:
+        with self._lock:
             req = self._profile_cycle_requested
             self._profile_cycle_requested = False
             return req
 
     def get_keys_pressed(self) -> frozenset[int]:
         """Snapshot of currently held virtual-key codes."""
-        with self._keys_lock:
+        with self._lock:
             return frozenset(self._keys_down)
 
     def get_mouse_buttons(self) -> tuple[bool, bool, bool, bool, bool]:
         """Return ``(left, right, middle, xbutton1, xbutton2)`` button states."""
-        with self._mouse_lock:
+        with self._lock:
             return (
                 self._lbutton,
                 self._rbutton,
@@ -300,7 +380,7 @@ class InputHooks:
 
     def get_extra_mouse_buttons(self) -> tuple[bool, bool]:
         """Return ``(xbutton1, xbutton2)`` button states."""
-        with self._mouse_lock:
+        with self._lock:
             return self._xbutton1, self._xbutton2
 
     # ── Lifecycle ────────────────────────────────────────────────────────
@@ -315,6 +395,7 @@ class InputHooks:
         _enable_per_monitor_dpi_awareness()
 
         self._ready.clear()
+        self._init_error = None
         self._thread = threading.Thread(
             target=self._pump_thread,
             name="InputHooks-pump",
@@ -323,8 +404,12 @@ class InputHooks:
         self._thread.start()
 
         if not self._ready.wait(timeout=5.0):
-            self._running = False
+            self.stop()
             raise RuntimeError("Hook thread did not start within 5 s")
+
+        if self._init_error is not None:
+            self.stop()
+            raise self._init_error
 
         # Register failsafe teardown paths
         atexit.register(self.stop)
@@ -334,22 +419,35 @@ class InputHooks:
         """Deactivate, unhook, stop the pump, and join the thread."""
         with self._cleanup_lock:
             if not self._running:
+                self._force_unhook()
                 return
             self._running = False
 
-        self._active = False
+        # Reset active flag and clear buffers atomically under state lock
+        with self._lock:
+            self._active = False
+            self._keys_down.clear()
+            self._last_pt = None
+            self._dx = self._dy = self._wheel_delta = 0
+            self._lbutton = False
+            self._rbutton = False
+            self._mbutton = False
+            self._xbutton1 = False
+            self._xbutton2 = False
+
+        # Immediately detach hooks so OS ceases delivering events
+        self._force_unhook()
 
         # Tell the pump thread to exit
         tid = self._thread_id
         if tid:
-            _user32.PostThreadMessageW(wt.DWORD(tid), WM_QUIT, 0, 0)
+            with contextlib.suppress(Exception):
+                _user32.PostThreadMessageW(wt.DWORD(tid), WM_QUIT, 0, 0)
 
-        # Wait for pump thread to finish
-        if self._thread is not None and self._thread.is_alive():
+        # Wait for pump thread to finish (avoid joining current thread)
+        cur_thread = threading.current_thread()
+        if self._thread is not None and self._thread is not cur_thread and self._thread.is_alive():
             self._thread.join(timeout=3.0)
-
-        # Force unhook from this thread if still active
-        self._force_unhook()
 
         with contextlib.suppress(Exception):
             atexit.unregister(self.stop)
@@ -376,7 +474,9 @@ class InputHooks:
         """Install hooks, run the Win32 message loop, unhook on exit."""
         try:
             msg = wt.MSG()
+            # Force message queue allocation on this thread
             _user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)
+            self._thread_id = _kernel32.GetCurrentThreadId()
 
             hmod = _kernel32.GetModuleHandleW(None)
 
@@ -400,26 +500,30 @@ class InputHooks:
                     f"SetWindowsHookExW(WH_MOUSE_LL) failed: {ctypes.WinError()}"
                 )
 
-            self._thread_id = _kernel32.GetCurrentThreadId()
             self._ready.set()
 
-            # Message pump
+            # Message pump loop
             while True:
                 ret = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
                 if ret <= 0:
                     break
+        except Exception as exc:
+            self._init_error = exc
+            self._ready.set()
         finally:
             self._force_unhook()
 
     def _force_unhook(self) -> None:
-        """Unhook both hooks if still installed (idempotent, any thread)."""
+        """Unhook both hooks if still installed (idempotent, thread-safe, reentrant)."""
         with self._cleanup_lock:
             kb, self._kb_hook = self._kb_hook, 0
             ms, self._mouse_hook = self._mouse_hook, 0
         if kb:
-            _user32.UnhookWindowsHookEx(kb)
+            with contextlib.suppress(Exception):
+                _user32.UnhookWindowsHookEx(kb)
         if ms:
-            _user32.UnhookWindowsHookEx(ms)
+            with contextlib.suppress(Exception):
+                _user32.UnhookWindowsHookEx(ms)
 
     # ── Hook Callbacks ───────────────────────────────────────────────────
 
@@ -436,8 +540,15 @@ class InputHooks:
             kbd = ctypes.cast(
                 lParam, ctypes.POINTER(KBDLLHOOKSTRUCT),
             ).contents
-            vk: int = kbd.vkCode
-            is_injected = bool(kbd.flags & LLKHF_INJECTED)
+            raw_vk: int = kbd.vkCode
+            # Virtual key code sanitization: must be within valid 1..255 byte boundary
+            if raw_vk <= 0 or raw_vk > 0xFF:
+                return int(_user32.CallNextHookEx(
+                    self._kb_hook, nCode, wParam, lParam,
+                ))
+
+            vk: int = raw_vk & 0xFF
+            is_injected = bool(kbd.flags & LLKHF_INJECTED_MASK)
 
             # ── Toggle key (F8) ──
             if vk == self._toggle_vk:
@@ -448,18 +559,28 @@ class InputHooks:
 
                         if new_active:
                             # Center cursor *before* activating capture
-                            cx = _user32.GetSystemMetrics(0) // 2
-                            cy = _user32.GetSystemMetrics(1) // 2
+                            sm_cx = _user32.GetSystemMetrics(SM_CXSCREEN)
+                            sm_cy = _user32.GetSystemMetrics(SM_CYSCREEN)
+                            cx = (sm_cx // 2) if sm_cx > 0 else 960
+                            cy = (sm_cy // 2) if sm_cy > 0 else 540
                             _user32.SetCursorPos(cx, cy)
 
-                            # Read actual landed cursor coordinate
+                            # Read and validate landed cursor coordinate within bounds
                             landed = wt.POINT()
+                            actual_pt = (cx, cy)
                             if _user32.GetCursorPos(ctypes.byref(landed)):
-                                actual_pt = (landed.x, landed.y)
-                            else:
-                                actual_pt = (cx, cy)
+                                vx = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+                                vy = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+                                vw = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+                                vh = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+                                if vw <= 0 or vh <= 0:
+                                    vx, vy = 0, 0
+                                    vw = sm_cx if sm_cx > 0 else 1920
+                                    vh = sm_cy if sm_cy > 0 else 1080
+                                if vx <= landed.x < vx + vw and vy <= landed.y < vy + vh:
+                                    actual_pt = (landed.x, landed.y)
 
-                            with self._mouse_lock:
+                            with self._lock:
                                 self._last_pt = actual_pt
                                 self._dx = self._dy = 0
                                 self._lbutton = False
@@ -468,24 +589,24 @@ class InputHooks:
                                 self._xbutton1 = False
                                 self._xbutton2 = False
                                 self._wheel_delta = 0
-                            with self._keys_lock:
                                 self._keys_down.clear()
-
-                            self._active = True
+                                self._active = True
                         else:
-                            self._active = False
-                            with self._keys_lock:
+                            with self._lock:
+                                self._active = False
                                 self._keys_down.clear()
-                            with self._mouse_lock:
                                 self._last_pt = None
                                 self._lbutton = False
                                 self._rbutton = False
                                 self._mbutton = False
                                 self._xbutton1 = False
                                 self._xbutton2 = False
+                                self._dx = self._dy = 0
+                                self._wheel_delta = 0
 
                         if self._on_toggle is not None:
-                            self._on_toggle(new_active)
+                            with contextlib.suppress(Exception):
+                                self._on_toggle(new_active)
 
                     elif wParam in _KEY_UP_MSGS:
                         self._f8_held = False
@@ -500,7 +621,7 @@ class InputHooks:
                 if not is_injected:
                     if wParam in _KEY_DOWN_MSGS and not self._f9_held:
                         self._f9_held = True
-                        with self._keys_lock:
+                        with self._lock:
                             self._profile_cycle_requested = True
                     elif wParam in _KEY_UP_MSGS:
                         self._f9_held = False
@@ -520,12 +641,13 @@ class InputHooks:
 
             # ── Active → record and swallow ──
             if self._active:
-                if wParam in _KEY_DOWN_MSGS:
-                    with self._keys_lock:
-                        self._keys_down.add(vk)
-                elif wParam in _KEY_UP_MSGS:
-                    with self._keys_lock:
-                        self._keys_down.discard(vk)
+                if not is_injected:
+                    if wParam in _KEY_DOWN_MSGS:
+                        with self._lock:
+                            self._keys_down.add(vk)
+                    elif wParam in _KEY_UP_MSGS:
+                        with self._lock:
+                            self._keys_down.discard(vk)
                 return 1
 
         except Exception:
@@ -547,8 +669,8 @@ class InputHooks:
                 lParam, ctypes.POINTER(MSLLHOOKSTRUCT),
             ).contents
 
-            # Ignore injected synthetic events (e.g. from SetCursorPos)
-            if mouse.flags & LLMHF_INJECTED:
+            # Ignore injected synthetic events (e.g. from SetCursorPos or SendInput)
+            if mouse.flags & LLMHF_INJECTED_MASK:
                 return 1
 
             msg: int = wParam
@@ -556,16 +678,16 @@ class InputHooks:
             # ── Movement → accumulate dx/dy without overwriting baseline ──
             if msg == WM_MOUSEMOVE:
                 x, y = mouse.pt.x, mouse.pt.y
-                with self._mouse_lock:
+                with self._lock:
                     if self._last_pt is not None:
                         self._dx += x - self._last_pt[0]
                         self._dy += y - self._last_pt[1]
                 return 1
 
-            # ── Standard buttons down ──
+            # ── Standard buttons down (including double-clicks) ──
             btn = _BTN_DOWN_MAP.get(msg)
             if btn is not None:
-                with self._mouse_lock:
+                with self._lock:
                     if btn == "left":
                         self._lbutton = True
                     elif btn == "right":
@@ -577,7 +699,7 @@ class InputHooks:
             # ── Standard buttons up ──
             btn = _BTN_UP_MAP.get(msg)
             if btn is not None:
-                with self._mouse_lock:
+                with self._lock:
                     if btn == "left":
                         self._lbutton = False
                     elif btn == "right":
@@ -586,31 +708,32 @@ class InputHooks:
                         self._mbutton = False
                 return 1
 
-            # ── X buttons down (thumb buttons) ──
-            if msg == WM_XBUTTONDOWN:
+            # ── X buttons down (thumb buttons, including double-clicks) ──
+            if msg in (WM_XBUTTONDOWN, WM_XBUTTONDBLCLK):
                 xbtn = (mouse.mouseData >> 16) & 0xFFFF
-                with self._mouse_lock:
-                    if xbtn == XBUTTON1:
+                with self._lock:
+                    if xbtn & XBUTTON1:
                         self._xbutton1 = True
-                    elif xbtn == XBUTTON2:
+                    if xbtn & XBUTTON2:
                         self._xbutton2 = True
                 return 1
 
             # ── X buttons up ──
             if msg == WM_XBUTTONUP:
                 xbtn = (mouse.mouseData >> 16) & 0xFFFF
-                with self._mouse_lock:
-                    if xbtn == XBUTTON1:
+                with self._lock:
+                    if xbtn & XBUTTON1:
                         self._xbutton1 = False
-                    elif xbtn == XBUTTON2:
+                    if xbtn & XBUTTON2:
                         self._xbutton2 = False
                 return 1
 
-            # ── Mouse wheel ──
-            if msg == WM_MOUSEWHEEL:
+            # ── Mouse wheel (signed 16-bit delta via bitwise extraction) ──
+            if msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
                 raw: int = mouse.mouseData
-                delta: int = ctypes.c_short((raw >> 16) & 0xFFFF).value
-                with self._mouse_lock:
+                hiword: int = (raw >> 16) & 0xFFFF
+                delta: int = hiword if hiword < 0x8000 else hiword - 0x10000
+                with self._lock:
                     self._wheel_delta += delta
                 return 1
 
@@ -628,7 +751,9 @@ class InputHooks:
     def _console_ctrl_handler(self, ctrl_type: int) -> int:
         """Handle console close, break, or shutdown events cleanly."""
         self.stop()
-        return 0  # Pass through to default handler
+        if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
+            return 1  # TRUE: handled, cleanup complete
+        return 0  # FALSE: pass through to Python runtime for CTRL_C / CTRL_BREAK (SIGINT)
 
     # ── Failsafe Registration ────────────────────────────────────────────
 
@@ -636,7 +761,8 @@ class InputHooks:
         """Register SIGINT/SIGTERM, console ctrl, and excepthook overrides."""
         # Console control handler for Windows CLI / Close Window events
         self._console_ctrl_routine = PHANDLER_ROUTINE(self._console_ctrl_handler)
-        _kernel32.SetConsoleCtrlHandler(self._console_ctrl_routine, True)
+        if not _kernel32.SetConsoleCtrlHandler(self._console_ctrl_routine, True):
+            self._console_ctrl_routine = None
 
         # Signal handlers (main thread only)
         if threading.current_thread() is threading.main_thread():
@@ -674,9 +800,10 @@ class InputHooks:
     def _restore_failsafes(self) -> None:
         """Restore original console handler, signal handlers, and excepthooks."""
         if self._console_ctrl_routine is not None:
-            with contextlib.suppress(Exception):
-                _kernel32.SetConsoleCtrlHandler(self._console_ctrl_routine, False)
+            routine = self._console_ctrl_routine
             self._console_ctrl_routine = None
+            with contextlib.suppress(Exception):
+                _kernel32.SetConsoleCtrlHandler(routine, False)
 
         if threading.current_thread() is threading.main_thread():
             try:

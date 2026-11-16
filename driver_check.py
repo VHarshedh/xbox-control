@@ -52,11 +52,32 @@ def _get_system_directory() -> Path:
         kernel32.GetSystemDirectoryW.argtypes = [wt.LPWSTR, wt.UINT]
         kernel32.GetSystemDirectoryW.restype = wt.UINT
         n = kernel32.GetSystemDirectoryW(buf, 260)
-        if 0 < n <= 260:
-            return Path(buf.value)
+        if n > 260:
+            buf = ctypes.create_unicode_buffer(n)
+            n = kernel32.GetSystemDirectoryW(buf, n)
+        if 0 < n <= len(buf):
+            p = Path(buf.value)
+            if p.is_dir():
+                return p
     except Exception:
         pass
     return Path(r"C:\Windows\System32")
+
+
+def _load_advapi32() -> ctypes.WinDLL:
+    """Load advapi32.dll strictly from System32 using LOAD_LIBRARY_SEARCH_SYSTEM32 (CWE-426/427)."""
+    # LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800
+    try:
+        return ctypes.WinDLL("advapi32.dll", winmode=0x00000800)
+    except TypeError:
+        sys_dir = _get_system_directory()
+        return ctypes.WinDLL(str(sys_dir / "advapi32.dll"))
+    except Exception as exc:
+        sys_dir = _get_system_directory()
+        dll_path = sys_dir / "advapi32.dll"
+        if not dll_path.is_file():
+            raise FileNotFoundError(f"advapi32.dll not found at secure path: {dll_path}") from exc
+        return ctypes.WinDLL(str(dll_path), winmode=0x00000800)
 
 
 def check_vigembus_service() -> tuple[bool, str]:
@@ -64,11 +85,16 @@ def check_vigembus_service() -> tuple[bool, str]:
 
     Checks the Service Control Manager via Win32 advapi32 ctypes first
     (locale-independent, avoids 64-bit pointer truncation). Falls back
-    to `sc query ViGEmBus` if ctypes SCM query fails.
+    to `sc query ViGEmBus` if ctypes SCM query fails. Guarantees that
+    SCM and Service handles are closed under all exceptions and return paths.
     """
+    scm = None
+    svc = None
+    advapi32 = None
+
     # --- Attempt 1: Win32 Service Control Manager via ctypes (Primary) ---
     try:
-        advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
+        advapi32 = _load_advapi32()
 
         SC_MANAGER_CONNECT: int = 0x0001
         SERVICE_QUERY_STATUS: int = 0x0004
@@ -104,29 +130,33 @@ def check_vigembus_service() -> tuple[bool, str]:
 
         scm = advapi32.OpenSCManagerW(None, None, SC_MANAGER_CONNECT)
         if scm:
-            try:
-                svc = advapi32.OpenServiceW(scm, "ViGEmBus", SERVICE_QUERY_STATUS)
-                if svc:
-                    try:
-                        status = SERVICE_STATUS()
-                        ok = advapi32.QueryServiceStatus(svc, ctypes.byref(status))
-                        if ok and status.dwCurrentState == SERVICE_RUNNING:
-                            return True, "ViGEmBus service is installed and RUNNING."
-                        if ok:
-                            return False, (
-                                "ViGEmBus service is installed but NOT running.\n"
-                                "  → Try: sc start ViGEmBus  (as Administrator)\n"
-                                "  → Or reboot after installing ViGEmBus v1.17.333+."
-                            )
-                    finally:
-                        advapi32.CloseServiceHandle(svc)
-                else:
-                    # Service not registered in SCM
+            svc = advapi32.OpenServiceW(scm, "ViGEmBus", SERVICE_QUERY_STATUS)
+            if svc:
+                status = SERVICE_STATUS()
+                ok = advapi32.QueryServiceStatus(svc, ctypes.byref(status))
+                if ok and status.dwCurrentState == SERVICE_RUNNING:
+                    return True, "ViGEmBus service is installed and RUNNING."
+                if ok:
+                    return False, (
+                        "ViGEmBus service is installed but NOT running.\n"
+                        "  → Try: sc start ViGEmBus  (as Administrator)\n"
+                        "  → Or reboot after installing ViGEmBus v1.17.333+."
+                    )
+            else:
+                err = ctypes.GetLastError()
+                # ERROR_SERVICE_DOES_NOT_EXIST = 1060
+                if err == 1060:
                     return False, _vigembus_install_message()
-            finally:
-                advapi32.CloseServiceHandle(scm)
     except Exception:
         pass  # Fall through to `sc query` fallback
+    finally:
+        if advapi32 is not None:
+            if svc:
+                with contextlib.suppress(Exception):
+                    advapi32.CloseServiceHandle(svc)
+            if scm:
+                with contextlib.suppress(Exception):
+                    advapi32.CloseServiceHandle(scm)
 
     # --- Attempt 2: `sc.exe query` (Fallback - Hardened against CWE-426/427) ---
     try:

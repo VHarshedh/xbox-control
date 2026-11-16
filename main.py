@@ -8,11 +8,17 @@ gamepad report delivery.
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
+import ctypes
+import ctypes.wintypes as wt
 import logging
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import vgamepad as vg
 
@@ -23,9 +29,99 @@ from driver_check import (
 )
 from input_hooks import VK_F8, InputHookManager
 from profiles import ProfileManager
-from stick_mapper import TARGET_HZ, HighResTimer
+from stick_mapper import TARGET_HZ, HighResTimer, _winmm
 
 logger = logging.getLogger("vg_mapper")
+
+# ── Win32 Function Prototypes & Types ────────────────────────────────────
+
+PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wt.BOOL, wt.DWORD)
+
+_user32: Any = None
+try:
+    _user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    _user32.ClipCursor.argtypes = [ctypes.c_void_p]
+    _user32.ClipCursor.restype = wt.BOOL
+except Exception:
+    _user32 = None
+
+_kernel32: Any = None
+try:
+    _kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    _kernel32.SetConsoleCtrlHandler.argtypes = [PHANDLER_ROUTINE, wt.BOOL]
+    _kernel32.SetConsoleCtrlHandler.restype = wt.BOOL
+except Exception:
+    _kernel32 = None
+
+# Reserved MS-DOS/Windows device names (case-insensitive)
+_RESERVED_DEVICE_NAMES: frozenset[str] = frozenset({
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+})
+
+MAX_CONSECUTIVE_TICK_ERRORS: int = 50
+TICK_ERROR_LOG_INTERVAL_SEC: float = 1.0
+
+
+# ── CLI & Profile Name Validation ────────────────────────────────────────
+
+
+def validate_profile_name(name: str) -> tuple[bool, str]:
+    """Validate profile name against path traversal, reserved names, and malformed inputs.
+
+    Returns (is_valid, failure_reason).
+    """
+    if not isinstance(name, str):
+        return False, "Profile name must be a string."
+
+    stripped = name.strip()
+    if not stripped:
+        return False, "Profile name cannot be empty or whitespace."
+
+    if len(stripped) > 64:
+        return False, f"Profile name exceeds maximum length of 64 characters (got {len(stripped)})."
+
+    if "\0" in stripped:
+        return False, "Profile name contains forbidden null byte."
+
+    if ":" in stripped:
+        return False, "Profile name contains forbidden NTFS Alternate Data Stream separator (':')."
+
+    if "/" in stripped or "\\" in stripped or ".." in stripped:
+        return False, "Profile name contains forbidden path separators or traversal components ('..')."
+
+    # Check for reserved Windows device names (e.g. CON, NUL, COM1, CON.json)
+    base_stem = Path(stripped).stem.upper()
+    if base_stem in _RESERVED_DEVICE_NAMES:
+        return False, f"Profile name '{stripped}' refers to a reserved Windows device name."
+
+    # Check forbidden characters for Windows filesystem naming
+    forbidden_chars = set('<>"/\\|?*')
+    found_forbidden = forbidden_chars.intersection(stripped)
+    if found_forbidden:
+        return False, f"Profile name contains forbidden characters: {' '.join(sorted(found_forbidden))}"
+
+    return True, ""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -37,7 +133,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--profile",
         "-p",
         type=str,
-        default="Shooter",
+        default=None,
         help="Initial profile name or filename (default: Shooter)",
     )
     parser.add_argument(
@@ -53,6 +149,158 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Enable detailed diagnostic logging",
     )
     return parser.parse_args(argv)
+
+
+# ── Failsafe Lifecycle Management ────────────────────────────────────────
+
+
+class AppLifecycle:
+    """Manages application lifecycle and guarantees failsafe resource teardown.
+
+    Guarantees that under all exit paths (normal completion, SIGINT, SIGTERM,
+    Windows console close/logoff/shutdown, or unhandled runtime exceptions):
+    1. Virtual Xbox 360 controller is neutralized and released.
+    2. Low-level Win32 hooks are unhooked and hook thread is stopped.
+    3. Any cursor clipping or confinement is cleared.
+    4. WinMM high-resolution timer period (timeEndPeriod) is restored.
+    """
+
+    def __init__(self) -> None:
+        self.gamepad: vg.VX360Gamepad | None = None
+        self.hooks: InputHookManager | None = None
+        self.timer: HighResTimer | None = None
+        self.timer_entered: bool = False
+        self.shutdown_event = threading.Event()
+
+        self._cleanup_lock = threading.RLock()
+        self._cleaned_up: bool = False
+        self._console_ctrl_routine: Any = None
+        self._orig_excepthook: Any = sys.excepthook
+        self._orig_sigint: Any = None
+        self._orig_sigterm: Any = None
+        self._registered_atexit: bool = False
+
+    def setup_handlers(self) -> None:
+        """Register failsafe handlers for console events, signals, excepthook, and atexit."""
+        # 1. atexit registration
+        atexit.register(self.cleanup)
+        self._registered_atexit = True
+
+        # 2. sys.excepthook override
+        self._orig_excepthook = sys.excepthook
+
+        def _failsafe_excepthook(
+            etype: type[BaseException],
+            val: BaseException,
+            tb: Any,
+        ) -> None:
+            self.cleanup()
+            self._orig_excepthook(etype, val, tb)
+
+        sys.excepthook = _failsafe_excepthook
+
+        # 3. Windows SetConsoleCtrlHandler
+        if _kernel32 is not None:
+
+            def _ctrl_handler(ctrl_type: int) -> int:
+                # 0 = CTRL_C_EVENT, 1 = CTRL_BREAK_EVENT
+                # 2 = CTRL_CLOSE_EVENT, 5 = CTRL_LOGOFF_EVENT, 6 = CTRL_SHUTDOWN_EVENT
+                self.shutdown_event.set()
+                if ctrl_type in (2, 5, 6):
+                    self.cleanup()
+                    return 1
+                return 0
+
+            self._console_ctrl_routine = PHANDLER_ROUTINE(_ctrl_handler)
+            _kernel32.SetConsoleCtrlHandler(self._console_ctrl_routine, True)
+
+        # 4. Signal Handlers (main thread only)
+        if threading.current_thread() is threading.main_thread():
+            try:
+                self._orig_sigint = signal.getsignal(signal.SIGINT)
+                self._orig_sigterm = signal.getsignal(signal.SIGTERM)
+
+                def _sig_handler(signum: int, frame: Any) -> None:
+                    self.shutdown_event.set()
+                    if signum == signal.SIGINT:
+                        raise KeyboardInterrupt
+                    self.cleanup()
+                    sys.exit(128 + signum)
+
+                signal.signal(signal.SIGINT, _sig_handler)
+                signal.signal(signal.SIGTERM, _sig_handler)
+            except (ValueError, OSError):
+                pass
+
+    def cleanup(self) -> None:
+        """Perform thread-safe, idempotent, failsafe teardown of all resources."""
+        with self._cleanup_lock:
+            if self._cleaned_up:
+                return
+            self._cleaned_up = True
+
+            logger.debug("Executing failsafe application cleanup...")
+
+            # 1. Release cursor clipping / locks
+            if _user32 is not None:
+                with contextlib.suppress(Exception):
+                    _user32.ClipCursor(None)
+
+            # 2. Stop and unhook Win32 hooks
+            if self.hooks is not None:
+                with contextlib.suppress(Exception):
+                    self.hooks.stop()
+                self.hooks = None
+
+            # 3. Neutralize and delete virtual Xbox 360 controller
+            if self.gamepad is not None:
+                with contextlib.suppress(Exception):
+                    self.gamepad.reset()
+                    self.gamepad.update()
+                with contextlib.suppress(Exception):
+                    del self.gamepad
+                self.gamepad = None
+
+            # 4. Strictly pair WinMM timeEndPeriod(1)
+            if self.timer_entered:
+                self.timer_entered = False
+                with contextlib.suppress(Exception):
+                    if _winmm is not None:
+                        _winmm.timeEndPeriod(ctypes.c_uint(1))
+                    elif self.timer is not None:
+                        self.timer.__exit__(None, None, None)
+                self.timer = None
+
+            # 5. Restore handlers
+            if self._console_ctrl_routine is not None and _kernel32 is not None:
+                with contextlib.suppress(Exception):
+                    _kernel32.SetConsoleCtrlHandler(self._console_ctrl_routine, False)
+                self._console_ctrl_routine = None
+
+            if self._registered_atexit:
+                with contextlib.suppress(Exception):
+                    atexit.unregister(self.cleanup)
+                self._registered_atexit = False
+
+            with contextlib.suppress(Exception):
+                sys.excepthook = self._orig_excepthook
+
+            if threading.current_thread() is threading.main_thread():
+                with contextlib.suppress(Exception):
+                    if self._orig_sigint is not None:
+                        signal.signal(signal.SIGINT, self._orig_sigint)
+                    if self._orig_sigterm is not None:
+                        signal.signal(signal.SIGTERM, self._orig_sigterm)
+
+    def __enter__(self) -> AppLifecycle:
+        self.setup_handlers()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.cleanup()
+
+
+# ── System Verification ──────────────────────────────────────────────────
 
 
 def verify_system_requirements() -> bool:
@@ -73,6 +321,9 @@ def verify_system_requirements() -> bool:
     return True
 
 
+# ── Main Mapping Engine ──────────────────────────────────────────────────
+
+
 def run_mapper(argv: list[str] | None = None) -> int:
     """Initialize subsystems and run the fixed 250 Hz input mapping loop."""
     args = parse_args(argv)
@@ -88,14 +339,39 @@ def run_mapper(argv: list[str] | None = None) -> int:
 
     # Handle --list-profiles
     if args.list_profiles:
-        print("Available profiles in:", profiles_dir)
+        if not profiles_dir.is_dir():
+            print(f"[FAIL] Profiles directory does not exist: {profiles_dir}", file=sys.stderr)
+            return 1
+
+        print("Available controller profiles:")
         try:
-            mgr = ProfileManager(profiles_dir=profiles_dir)
-            for p in mgr.profiles:
-                print(f"  • {p.name:<15} ({p.file_path.name})")
+            json_files = sorted(profiles_dir.glob("*.json"))
+            if not json_files:
+                print("  (No profile files found in profiles directory)")
+                return 0
+
+            loaded_count = 0
+            for json_path in json_files:
+                try:
+                    prof = ProfileManager.load_profile(json_path, base_dir=profiles_dir)
+                    print(f"  • {prof.name:<15} ({json_path.name})")
+                    loaded_count += 1
+                except Exception as p_err:
+                    print(f"  • [INVALID] {json_path.name}: {p_err}", file=sys.stderr)
+
+            if loaded_count == 0:
+                print("[WARNING] No valid profiles could be loaded.", file=sys.stderr)
+                return 1
             return 0
         except Exception as exc:
-            print(f"Error reading profiles: {exc}", file=sys.stderr)
+            print(f"[FAIL] Error reading profiles: {exc}", file=sys.stderr)
+            return 1
+
+    # Validate requested profile argument if provided
+    if args.profile is not None:
+        valid_name, reason = validate_profile_name(args.profile)
+        if not valid_name:
+            print(f"[FAIL] Invalid profile name: {reason}", file=sys.stderr)
             return 1
 
     print("=" * 60)
@@ -109,58 +385,116 @@ def run_mapper(argv: list[str] | None = None) -> int:
 
     # 2. Discover and Load Mapping Profiles
     try:
-        profile_mgr = ProfileManager(profiles_dir=profiles_dir, default_name=args.profile)
+        profile_mgr = ProfileManager(profiles_dir=profiles_dir)
     except Exception as exc:
         print(f"[FAIL] Error loading profiles: {exc}", file=sys.stderr)
         return 1
 
-    # 3. Instantiate Virtual Xbox 360 Controller
-    gamepad: vg.VX360Gamepad | None = None
-    try:
-        gamepad = vg.VX360Gamepad()
-        gamepad.reset()
-        gamepad.update()
-    except Exception as exc:
-        print(f"[FAIL] Failed to allocate virtual controller: {exc}", file=sys.stderr)
+    if not profile_mgr.profiles:
+        print("[FAIL] No valid profiles loaded.", file=sys.stderr)
         return 1
 
-    print(f"  [OK] Controller created (Active Profile: {profile_mgr.current_profile.name})")
-    print("  Controls:")
-    print("    [F8] Toggle Input Capture ON / OFF")
-    print("    [F9] Cycle Profiles (Shooter <-> RTS / Menu)")
-    print("    [Ctrl+C] Clean Exit")
-    print("=" * 60)
+    # Select requested or default profile
+    if args.profile is not None:
+        target = args.profile.strip().lower()
+        matched_idx: int | None = None
+        for idx, prof in enumerate(profile_mgr.profiles):
+            if (
+                prof.name.lower() == target
+                or prof.file_path.stem.lower() == target
+                or prof.file_path.name.lower() == target
+            ):
+                matched_idx = idx
+                break
 
-    # 4. Initialize Low-Level Win32 Hooks
-    hooks = InputHookManager(toggle_key=VK_F8)
+        if matched_idx is None:
+            available = ", ".join(p.name for p in profile_mgr.profiles)
+            print(
+                f"[FAIL] Profile '{args.profile}' not found. Available profiles: {available}",
+                file=sys.stderr,
+            )
+            return 1
+        profile_mgr.current_index = matched_idx
+    else:
+        # Default profile: look for "Shooter", else first available
+        for idx, prof in enumerate(profile_mgr.profiles):
+            if prof.name.lower() == "shooter" or prof.file_path.stem.lower() == "shooter":
+                profile_mgr.current_index = idx
+                break
+        else:
+            profile_mgr.current_index = 0
 
-    was_active = False
+    with AppLifecycle() as lifecycle:
+        # 3. Instantiate Virtual Xbox 360 Controller
+        try:
+            gamepad = vg.VX360Gamepad()
+            gamepad.reset()
+            gamepad.update()
+            lifecycle.gamepad = gamepad
+        except Exception as exc:
+            print(f"[FAIL] Failed to allocate virtual controller: {exc}", file=sys.stderr)
+            return 1
 
-    try:
-        with hooks, HighResTimer(TARGET_HZ) as timer:
-            while True:
+        print(f"  [OK] Controller created (Active Profile: {profile_mgr.current_profile.name})")
+        print("  Controls:")
+        print("    [F8] Toggle Input Capture ON / OFF")
+        print("    [F9] Cycle Profiles (Shooter <-> RTS / Menu)")
+        print("    [Ctrl+C] Clean Exit")
+        print("=" * 60)
+
+        # 4. Initialize Low-Level Win32 Hooks
+        try:
+            hooks = InputHookManager(toggle_key=VK_F8)
+            lifecycle.hooks = hooks
+            hooks.start()
+        except Exception as exc:
+            print(f"[FAIL] Failed to install Win32 input hooks: {exc}", file=sys.stderr)
+            return 1
+
+        # 5. Initialize High-Resolution Timer
+        try:
+            timer = HighResTimer(TARGET_HZ)
+            lifecycle.timer = timer
+            timer.__enter__()
+            lifecycle.timer_entered = True
+        except Exception as exc:
+            print(f"[FAIL] Failed to initialize high-resolution timer: {exc}", file=sys.stderr)
+            return 1
+
+        was_active = False
+        consecutive_tick_errors = 0
+        last_tick_error_log = 0.0
+
+        try:
+            while not lifecycle.shutdown_event.is_set():
                 # ── Profile cycling hotkey check (F9 consumed from hook thread) ──
                 if hooks.consume_profile_cycle():
-                    active_prof = profile_mgr.cycle()
-                    gamepad.reset()
-                    gamepad.update()
-                    print(f"[PROFILE] {active_prof.name}", flush=True)
-                    logger.debug("Switched profile to: %s", active_prof.name)
+                    try:
+                        active_prof = profile_mgr.cycle()
+                        gamepad.reset()
+                        gamepad.update()
+                        print(f"[PROFILE] {active_prof.name}", flush=True)
+                        logger.debug("Switched profile to: %s", active_prof.name)
+                    except Exception as cyc_exc:
+                        logger.warning("Error cycling profile: %s", cyc_exc)
 
                 active = hooks.active
 
                 # ── State transition detection ──
                 if active != was_active:
-                    if active:
-                        timer.reset()
-                        profile_mgr.current_profile.mapper.reset()
-                        print(f"[ON] Profile: {profile_mgr.current_profile.name}", flush=True)
-                        logger.debug("Capture activated.")
-                    else:
-                        gamepad.reset()
-                        gamepad.update()
-                        print("[OFF] Mouse/KB Released", flush=True)
-                        logger.debug("Capture deactivated.")
+                    try:
+                        if active:
+                            timer.reset()
+                            profile_mgr.current_profile.mapper.reset()
+                            print(f"[ON] Profile: {profile_mgr.current_profile.name}", flush=True)
+                            logger.debug("Capture activated.")
+                        else:
+                            gamepad.reset()
+                            gamepad.update()
+                            print("[OFF] Mouse/KB Released", flush=True)
+                            logger.debug("Capture deactivated.")
+                    except Exception as trans_exc:
+                        logger.warning("Error during state transition: %s", trans_exc)
                     was_active = active
 
                 # ── Inactive idle path: save CPU cycles ──
@@ -169,47 +503,75 @@ def run_mapper(argv: list[str] | None = None) -> int:
                     continue
 
                 # ── Active 250 Hz tick (4 ms budget) ──
-                dt = timer.wait()
-                prof = profile_mgr.current_profile
+                try:
+                    dt = timer.wait()
+                    prof = profile_mgr.current_profile
 
-                # A. Right Stick: accumulate mouse deltas and apply curve
-                dx, dy = hooks.consume_mouse_delta()
-                rx, ry = prof.mapper.step(dx, dy, dt)
-                gamepad.right_joystick(x_value=rx, y_value=ry)
+                    # A. Right Stick: accumulate mouse deltas and apply curve
+                    dx, dy = hooks.consume_mouse_delta()
+                    rx, ry = prof.mapper.step(dx, dy, dt)
+                    gamepad.right_joystick(x_value=rx, y_value=ry)
 
-                # B. Left Stick: WASD directional inputs with diagonal normalization
-                keys_pressed = hooks.get_keys_pressed()
-                lx, ly = prof.compute_left_stick(keys_pressed)
-                gamepad.left_joystick(x_value=lx, y_value=ly)
+                    # B. Left Stick: WASD directional inputs with diagonal normalization
+                    keys_pressed = hooks.get_keys_pressed()
+                    lx, ly = prof.compute_left_stick(keys_pressed)
+                    gamepad.left_joystick(x_value=lx, y_value=ly)
 
-                # C. Buttons & Triggers: apply active profile mappings
-                lb, rb, mb, x1, x2 = hooks.get_mouse_buttons()
-                prof.apply_buttons(
-                    gamepad=gamepad,
-                    keys_pressed=keys_pressed,
-                    lbutton=lb,
-                    rbutton=rb,
-                    mbutton=mb,
-                    xbutton1=x1,
-                    xbutton2=x2,
-                )
+                    # C. Buttons & Triggers: apply active profile mappings
+                    lb, rb, mb, x1, x2 = hooks.get_mouse_buttons()
+                    prof.apply_buttons(
+                        gamepad=gamepad,
+                        keys_pressed=keys_pressed,
+                        lbutton=lb,
+                        rbutton=rb,
+                        mbutton=mb,
+                        xbutton1=x1,
+                        xbutton2=x2,
+                    )
 
-                # D. Commit report to ViGEmBus
-                gamepad.update()
+                    # D. Commit report to ViGEmBus
+                    gamepad.update()
+                    consecutive_tick_errors = 0
 
-    except KeyboardInterrupt:
-        print("\nShutdown requested by user (Ctrl+C).")
-    finally:
-        # Full failsafe cleanup
-        print("Releasing virtual controller and Win32 hooks...")
-        if gamepad is not None:
-            with contextlib.suppress(Exception):
-                gamepad.reset()
-                gamepad.update()
-            with contextlib.suppress(Exception):
-                del gamepad
-        print("Shutdown complete.")
+                except Exception as tick_exc:
+                    consecutive_tick_errors += 1
+                    # Failsafe: reset controller immediately to prevent stuck inputs
+                    with contextlib.suppress(Exception):
+                        gamepad.reset()
+                        gamepad.update()
 
+                    # Throttle logging to prevent fast-path I/O saturation (at most 1 log / sec)
+                    now = time.monotonic()
+                    if now - last_tick_error_log >= TICK_ERROR_LOG_INTERVAL_SEC:
+                        logger.warning(
+                            "Transient per-tick error in mapping loop: %s (consecutive: %d)",
+                            tick_exc,
+                            consecutive_tick_errors,
+                        )
+                        last_tick_error_log = now
+
+                    # Break out safely if persistent failure occurs (e.g. driver lost)
+                    if consecutive_tick_errors >= MAX_CONSECUTIVE_TICK_ERRORS:
+                        logger.error(
+                            "Fatal: %d consecutive tick errors in 250 Hz loop. Shutting down.",
+                            MAX_CONSECUTIVE_TICK_ERRORS,
+                        )
+                        if _user32 is not None:
+                            with contextlib.suppress(Exception):
+                                _user32.ClipCursor(None)
+                        if hasattr(hooks, "_active"):
+                            hooks._active = False
+                        break
+
+        except KeyboardInterrupt:
+            print("\nShutdown requested by user (Ctrl+C).")
+        except Exception as loop_exc:
+            logger.error("Unhandled runtime exception in mapping loop: %s", loop_exc, exc_info=True)
+            return 1
+        finally:
+            print("Releasing virtual controller and Win32 hooks...")
+
+    print("Shutdown complete.")
     return 0
 
 

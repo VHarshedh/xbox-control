@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -81,6 +82,14 @@ class TestTargetParsing:
     def test_invalid_target(self) -> None:
         with pytest.raises(ValueError, match="Unknown controller target button"):
             parse_target("INVALID_BUTTON")
+
+    def test_unsupported_playstation_and_unknown_triggers(self) -> None:
+        with pytest.raises(ValueError, match="PlayStation controls are not supported"):
+            parse_target("CROSS")
+        with pytest.raises(ValueError, match="PlayStation controls are not supported"):
+            parse_target("TRIANGLE")
+        with pytest.raises(ValueError, match="Unknown controller trigger target"):
+            parse_target("UNKNOWN_TRIGGER")
 
 
 class TestProfileSecurityAndValidation:
@@ -169,6 +178,82 @@ class TestProfileSecurityAndValidation:
         with pytest.raises(ValueError, match="Non-finite JSON constant"):
             ProfileManager.load_profile(inf_file)
 
+    def test_negative_infinity_rejection(self, tmp_path: Path) -> None:
+        neginf_file = tmp_path / "neginf_profile.json"
+        neginf_file.write_text(
+            '{"name": "NegInf Profile", "stick_config": {"sensitivity": -Infinity, "curve_exponent": 1.0, "deadzone_comp": 0.1, "decay_rate": 0.8, "smoothing_alpha": 0.5}, "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68}, "buttons": {}}',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Non-finite JSON constant"):
+            ProfileManager.load_profile(neginf_file)
+
+    def test_wasd_invalid_vk(self, tmp_path: Path) -> None:
+        bad_wasd = tmp_path / "bad_wasd.json"
+        data = {
+            "name": "Bad WASD",
+            "stick_config": {
+                "sensitivity": 0.05,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": "INVALID_KEY_XYZ", "down": 83, "left": 65, "right": 68},
+            "buttons": {},
+        }
+        bad_wasd.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ValueError, match="invalid 'wasd_left_stick'"):
+            ProfileManager.load_profile(bad_wasd)
+
+    def test_stick_config_invalid_bounds(self, tmp_path: Path) -> None:
+        def make_profile(stick_cfg: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "name": "Test",
+                "stick_config": stick_cfg,
+                "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+                "buttons": {},
+            }
+
+        # sensitivity <= 0
+        p = tmp_path / "bad_sens.json"
+        cfg: dict[str, Any] = {
+            "sensitivity": -1.0,
+            "curve_exponent": 1.0,
+            "deadzone_comp": 0.1,
+            "decay_rate": 0.8,
+            "smoothing_alpha": 0.5,
+        }
+        p.write_text(json.dumps(make_profile(cfg)), encoding="utf-8")
+        with pytest.raises(ValueError, match="sensitivity must be > 0"):
+            ProfileManager.load_profile(p)
+
+        # decay_rate > 1.0
+        p = tmp_path / "bad_decay.json"
+        cfg["sensitivity"] = 0.05
+        cfg["decay_rate"] = 1.5
+        p.write_text(json.dumps(make_profile(cfg)), encoding="utf-8")
+        with pytest.raises(ValueError, match="decay_rate must be in"):
+            ProfileManager.load_profile(p)
+
+        # smoothing_alpha <= 0
+        p = tmp_path / "bad_smoothing.json"
+        cfg["decay_rate"] = 0.8
+        cfg["smoothing_alpha"] = 0.0
+        p.write_text(json.dumps(make_profile(cfg)), encoding="utf-8")
+        with pytest.raises(ValueError, match="smoothing_alpha must be in"):
+            ProfileManager.load_profile(p)
+
+    def test_profile_manager_lifecycle(self, tmp_path: Path) -> None:
+        # Non-existent directory
+        with pytest.raises(FileNotFoundError, match="Profiles directory does not exist"):
+            ProfileManager(profiles_dir=tmp_path / "nonexistent")
+
+        # Empty directory
+        empty_dir = tmp_path / "empty_profiles"
+        empty_dir.mkdir()
+        with pytest.raises(FileNotFoundError, match="No .json profile files found"):
+            ProfileManager(profiles_dir=empty_dir)
+
     def test_path_containment_violation(self, tmp_path: Path) -> None:
         base_dir = tmp_path / "allowed_dir"
         base_dir.mkdir()
@@ -243,6 +328,39 @@ class TestProfileSecurityAndValidation:
             ValueError, match="Reparse points and junctions are rejected"
         ):
             ProfileManager.load_profile(dummy)
+
+    def test_windows_reserved_device_names(self, tmp_path: Path) -> None:
+        for dev in ("CON.json", "NUL.json", "AUX.json", "PRN.json", "COM1.json", "LPT1.json"):
+            bad_path = tmp_path / dev
+            with pytest.raises(ValueError, match="Windows reserved device name rejected"):
+                ProfileManager.load_profile(bad_path)
+
+    def test_ntfs_alternate_data_streams(self, tmp_path: Path) -> None:
+        valid_file = tmp_path / "valid.json"
+        valid_file.write_text('{"name": "Valid"}', encoding="utf-8")
+        ads_path = Path(str(valid_file) + ":stream")
+        with pytest.raises(ValueError, match="NTFS Alternate Data Streams"):
+            ProfileManager.load_profile(ads_path)
+
+    def test_extended_unc_path_rejection(self) -> None:
+        unc_path = Path(r"\\?\C:\profiles\shooter.json")
+        with pytest.raises(ValueError, match="Extended UNC/device paths are rejected"):
+            ProfileManager.load_profile(unc_path)
+
+    def test_duplicate_json_keys_rejection(self, tmp_path: Path) -> None:
+        dup_file = tmp_path / "dup.json"
+        dup_file.write_text(
+            '{"name": "First", "name": "Second", "stick_config": {"sensitivity": 0.05, "curve_exponent": 1.0, "deadzone_comp": 0.1, "decay_rate": 0.8, "smoothing_alpha": 0.5}, "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68}, "buttons": {}}',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Duplicate key in JSON object"):
+            ProfileManager.load_profile(dup_file)
+
+    def test_file_descriptor_closed_on_invalid_utf8(self, tmp_path: Path) -> None:
+        bad_utf8 = tmp_path / "bad_utf8.json"
+        bad_utf8.write_bytes(b"\xff\xfe\x00\x00 invalid binary data")
+        with pytest.raises(ValueError, match="is not valid UTF-8"):
+            ProfileManager.load_profile(bad_utf8)
 
 
 class TestWASDNormalization:

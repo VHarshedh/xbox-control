@@ -9,7 +9,7 @@ description = "High-performance Win32 mouse & keyboard to Xbox 360 virtual contr
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "vgamepad>=0.1.0,<0.2.0",
+    "vgamepad>=0.2.0,<0.3.0",
 ]
 
 [project.optional-dependencies]
