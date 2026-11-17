@@ -46,12 +46,14 @@ WM_XBUTTONDBLCLK: int = 0x020D
 WM_MOUSEHWHEEL: int = 0x020E
 
 WM_QUIT: int = 0x0012
+VK_TAB: int = 0x09
 VK_F8: int = 0x77
 VK_F9: int = 0x78
+VK_F11: int = 0x7A
 VK_LWIN: int = 0x5B
 VK_RWIN: int = 0x5C
 
-DEFAULT_PASSTHROUGH_KEYS: frozenset[int] = frozenset({VK_LWIN, VK_RWIN})
+DEFAULT_PASSTHROUGH_KEYS: frozenset[int] = frozenset({VK_LWIN, VK_RWIN, VK_F11})
 
 LLMHF_INJECTED: int = 0x01
 LLMHF_LOWER_IL_INJECTED: int = 0x02
@@ -443,6 +445,18 @@ class InputHooks:
             self._profile_cycle_requested = False
             return req
 
+    def reset_held_inputs(self) -> None:
+        """Thread-safe reset of accumulated mouse/wheel deltas and mouse button states."""
+        with self._lock:
+            self._dx = 0
+            self._dy = 0
+            self._wheel_delta = 0
+            self._lbutton = False
+            self._rbutton = False
+            self._mbutton = False
+            self._xbutton1 = False
+            self._xbutton2 = False
+
     def get_keys_pressed(self) -> frozenset[int]:
         """Snapshot of currently held virtual-key codes."""
         with self._lock:
@@ -496,6 +510,23 @@ class InputHooks:
         atexit.register(self.stop)
         self._install_failsafes()
 
+    def _deactivate_locked(self) -> None:
+        """Reset capture state and release cursor clipping under self._lock."""
+        self._active = False
+        self._center_pt = None
+        self._last_pt = None
+        self._keys_down.clear()
+        self._lbutton = False
+        self._rbutton = False
+        self._mbutton = False
+        self._xbutton1 = False
+        self._xbutton2 = False
+        self._dx = 0
+        self._dy = 0
+        self._wheel_delta = 0
+        with contextlib.suppress(Exception):
+            _user32.ClipCursor(None)
+
     def stop(self) -> None:
         """Deactivate, unhook, stop the pump, and join the thread."""
         with self._cleanup_lock:
@@ -506,20 +537,7 @@ class InputHooks:
 
         # Reset active flag and clear buffers atomically under state lock
         with self._lock:
-            self._active = False
-            self._center_pt = None
-            self._keys_down.clear()
-            self._last_pt = None
-            self._dx = self._dy = self._wheel_delta = 0
-            self._lbutton = False
-            self._rbutton = False
-            self._mbutton = False
-            self._xbutton1 = False
-            self._xbutton2 = False
-
-        # Release any cursor clipping or confinement
-        with contextlib.suppress(Exception):
-            _user32.ClipCursor(None)
+            self._deactivate_locked()
 
         # Immediately detach hooks so OS ceases delivering events
         self._force_unhook()
@@ -697,20 +715,7 @@ class InputHooks:
                                 self._keys_down.clear()
                                 self._active = True
                             else:
-                                self._active = False
-                                self._center_pt = None
-                                self._keys_down.clear()
-                                self._last_pt = None
-                                self._lbutton = False
-                                self._rbutton = False
-                                self._mbutton = False
-                                self._xbutton1 = False
-                                self._xbutton2 = False
-                                self._dx = self._dy = 0
-                                self._wheel_delta = 0
-
-                                with contextlib.suppress(Exception):
-                                    _user32.ClipCursor(None)
+                                self._deactivate_locked()
 
                         if self._on_toggle is not None:
                             with contextlib.suppress(Exception):
@@ -741,6 +746,17 @@ class InputHooks:
                     self._kb_hook, nCode, wParam, lParam,
                 ))
 
+            # ── Auto-Deactivate on Window Switch (Alt+Tab / Win key) ──
+            if self._active and (vk in (VK_LWIN, VK_RWIN) or (bool(kbd.flags & LLKHF_ALTDOWN) and vk == VK_TAB)):
+                with self._lock:
+                    self._deactivate_locked()
+                if self._on_toggle is not None:
+                    with contextlib.suppress(Exception):
+                        self._on_toggle(False)
+                return int(_user32.CallNextHookEx(
+                    self._kb_hook, nCode, wParam, lParam,
+                ))
+
             # ── Additional configured passthrough keys ──
             if vk in self._passthrough_keys:
                 return int(_user32.CallNextHookEx(
@@ -755,7 +771,13 @@ class InputHooks:
                             self._keys_down.add(vk)
                     elif wParam in _KEY_UP_MSGS:
                         with self._lock:
-                            self._keys_down.discard(vk)
+                            was_held = vk in self._keys_down
+                            if was_held:
+                                self._keys_down.discard(vk)
+                        if not was_held:
+                            return int(_user32.CallNextHookEx(
+                                self._kb_hook, nCode, wParam, lParam,
+                            ))
                 return 1
 
         except Exception:

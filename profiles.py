@@ -399,6 +399,7 @@ class WASDConfig:
     down: int
     left: int
     right: int
+    walk_key: int | None = None
 
 
 # ── Profile ──────────────────────────────────────────────────────────────
@@ -417,6 +418,8 @@ class Profile:
         "_all_buttons",
         "_uses_lt",
         "_uses_rt",
+        "_wheel_up_ticks",
+        "_wheel_down_ticks",
     )
 
     def __init__(
@@ -440,11 +443,15 @@ class Profile:
             "middle": [],
             "x1": [],
             "x2": [],
+            "wheel_up": [],
+            "wheel_down": [],
         }
         self._key_targets: dict[int, list[str | vg.XUSB_BUTTON]] = {}
         self._all_buttons: set[vg.XUSB_BUTTON] = set()
         self._uses_lt: bool = False
         self._uses_rt: bool = False
+        self._wheel_up_ticks: int = 0
+        self._wheel_down_ticks: int = 0
 
         self._parse_buttons(raw_buttons)
 
@@ -483,6 +490,12 @@ class Profile:
             elif upper_src in ("MOUSE_X2", "XBUTTON2", "VK_XBUTTON2"):
                 if tgt not in self._mouse_targets["x2"]:
                     self._mouse_targets["x2"].append(tgt)
+            elif upper_src in ("WHEEL_UP", "MOUSE_WHEEL_UP"):
+                if tgt not in self._mouse_targets["wheel_up"]:
+                    self._mouse_targets["wheel_up"].append(tgt)
+            elif upper_src in ("WHEEL_DOWN", "MOUSE_WHEEL_DOWN"):
+                if tgt not in self._mouse_targets["wheel_down"]:
+                    self._mouse_targets["wheel_down"].append(tgt)
             else:
                 vk = parse_vk(src_str)
                 targets = self._key_targets.setdefault(vk, [])
@@ -517,6 +530,10 @@ class Profile:
             lx = 32767 if wx > 0 else (-32768 if wx < 0 else 0)
             ly = 32767 if wy > 0 else (-32768 if wy < 0 else 0)
 
+        if self.wasd.walk_key is not None and self.wasd.walk_key in keys_pressed:
+            lx = int(lx * 0.5)
+            ly = int(ly * 0.5)
+
         lx = max(-32768, min(32767, lx))
         ly = max(-32768, min(32767, ly))
         return (lx, ly)
@@ -530,12 +547,19 @@ class Profile:
         mbutton: bool,
         xbutton1: bool = False,
         xbutton2: bool = False,
+        wheel_delta: int = 0,
     ) -> None:
-        """Map held keys and mouse buttons to virtual gamepad controls."""
+        """Map held keys, mouse buttons, and scroll wheel to virtual gamepad controls."""
         active_buttons: set[vg.XUSB_BUTTON] = set()
         lt_active = False
         rt_active = False
         keys = keys_pressed if keys_pressed is not None else frozenset()
+
+        # Update wheel pulse counters
+        if wheel_delta > 0:
+            self._wheel_up_ticks = 8
+        elif wheel_delta < 0:
+            self._wheel_down_ticks = 8
 
         # ── Mouse button actions ──
         if lbutton:
@@ -583,6 +607,27 @@ class Profile:
                 else:
                     active_buttons.add(tgt)
 
+        # ── Wheel pulse actions ──
+        if self._wheel_up_ticks > 0:
+            self._wheel_up_ticks -= 1
+            for tgt in self._mouse_targets["wheel_up"]:
+                if tgt == "RT":
+                    rt_active = True
+                elif tgt == "LT":
+                    lt_active = True
+                else:
+                    active_buttons.add(tgt)
+
+        if self._wheel_down_ticks > 0:
+            self._wheel_down_ticks -= 1
+            for tgt in self._mouse_targets["wheel_down"]:
+                if tgt == "RT":
+                    rt_active = True
+                elif tgt == "LT":
+                    lt_active = True
+                else:
+                    active_buttons.add(tgt)
+
         # ── Keyboard actions ──
         for vk, targets in self._key_targets.items():
             if vk in keys:
@@ -618,6 +663,8 @@ class Profile:
             gamepad.release_button(button=btn)
         gamepad.left_trigger(value=0)
         gamepad.right_trigger(value=0)
+        self._wheel_up_ticks = 0
+        self._wheel_down_ticks = 0
         self.mapper.reset()
 
 
@@ -860,7 +907,7 @@ class ProfileManager:
         if not isinstance(raw_wasd, dict):
             raise ValueError(f"Profile {path} missing 'wasd_left_stick' object.")
 
-        allowed_wasd_keys = {"up", "down", "left", "right"}
+        allowed_wasd_keys = {"up", "down", "left", "right", "walk"}
         unexpected_wasd = set(raw_wasd.keys()) - allowed_wasd_keys
         if unexpected_wasd:
             raise ValueError(
@@ -876,6 +923,7 @@ class ProfileManager:
             down_vk = parse_vk(raw_wasd["down"])
             left_vk = parse_vk(raw_wasd["left"])
             right_vk = parse_vk(raw_wasd["right"])
+            walk_vk = parse_vk(raw_wasd["walk"]) if "walk" in raw_wasd else None
         except (KeyError, ValueError) as err:
             raise ValueError(f"Profile {path} invalid 'wasd_left_stick': {err}") from err
 
@@ -885,7 +933,7 @@ class ProfileManager:
                 f"Profile {path}: Duplicate keys in 'wasd_left_stick': all 4 movement directions must be unique."
             )
 
-        wasd = WASDConfig(up=up_vk, down=down_vk, left=left_vk, right=right_vk)
+        wasd = WASDConfig(up=up_vk, down=down_vk, left=left_vk, right=right_vk, walk_key=walk_vk)
 
         # ── Buttons mapping ──
         raw_buttons = data.get("buttons")

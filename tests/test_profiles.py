@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import vgamepad as vg
 
 from profiles import ProfileManager, parse_target, parse_vk
 
@@ -431,3 +432,117 @@ class TestWASDNormalization:
         mag = math.hypot(lx, ly)
         assert mag <= 32767.5
         assert lx > 0 and ly > 0
+
+    def test_wasd_walk_modifier(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "walk_profile.json"
+        data = {
+            "name": "Walk Profile",
+            "stick_config": {
+                "sensitivity": 0.05,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {
+                "up": 87,
+                "down": 83,
+                "left": 65,
+                "right": 68,
+                "walk": "VK_LMENU",  # Left Alt = 0xA4
+            },
+            "buttons": {},
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        assert prof.wasd.walk_key == 0xA4
+
+        # Full speed Up
+        lx, ly = prof.compute_left_stick(frozenset({87}))
+        assert lx == 0
+        assert ly == 32767
+
+        # Walk speed Up (scaled by 0.5)
+        lx_walk, ly_walk = prof.compute_left_stick(frozenset({87, 0xA4}))
+        assert lx_walk == 0
+        assert ly_walk == int(32767 * 0.5)
+
+
+class TestWheelMappingAndGuideButtons:
+    """Validate scroll wheel pulse dynamics, decay across ticks, and guide button mappings."""
+
+    def test_wheel_up_down_pulse_activation_and_decay(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "wheel_profile.json"
+        data = {
+            "name": "Wheel Profile",
+            "stick_config": {
+                "sensitivity": 0.05,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "WHEEL_UP": "XUSB_GAMEPAD_Y",
+                "WHEEL_DOWN": "XUSB_GAMEPAD_X",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+
+        mock_gamepad = MagicMock()
+
+        # Step 1: Scroll UP impulse (wheel_delta=+120)
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+            wheel_delta=120,
+        )
+        assert prof._wheel_up_ticks == 7
+        mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)
+
+        # Pulse remains active for remaining 7 ticks (total 8 ticks)
+        for expected_remaining in range(6, -1, -1):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=False,
+                rbutton=False,
+                mbutton=False,
+                wheel_delta=0,
+            )
+            assert prof._wheel_up_ticks == expected_remaining
+            mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)
+
+        # Tick 9: pulse expired -> button released
+        mock_gamepad.reset_mock()
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+            wheel_delta=0,
+        )
+        assert prof._wheel_up_ticks == 0
+        mock_gamepad.release_button.assert_any_call(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)
+
+    def test_shooter_and_rts_profiles_guide_and_wheel(self) -> None:
+        profiles_dir = Path(__file__).parents[1] / "profiles"
+
+        # Shooter profile
+        shooter = ProfileManager.load_profile(profiles_dir / "shooter.json")
+        assert 0x24 in shooter._key_targets  # VK_HOME
+        assert shooter._key_targets[0x24] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE]
+        assert shooter._mouse_targets["wheel_up"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_Y]
+        assert shooter._mouse_targets["wheel_down"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_Y]
+
+        # RTS / Menu profile
+        rts = ProfileManager.load_profile(profiles_dir / "rts_menu.json")
+        assert 0x24 in rts._key_targets  # VK_HOME
+        assert rts._key_targets[0x24] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE]

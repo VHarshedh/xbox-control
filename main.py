@@ -511,6 +511,8 @@ def run_mapper(argv: list[str] | None = None) -> int:
         was_active = False
         consecutive_tick_errors = 0
         last_tick_error_log = 0.0
+        last_controller_state: tuple[int, int, int, int, int, int, int] | None = None
+        ticks_since_update = 0
 
         try:
             while not lifecycle.shutdown_event.is_set():
@@ -521,9 +523,13 @@ def run_mapper(argv: list[str] | None = None) -> int:
                 # ── Profile cycling hotkey check (F9 consumed from hook thread) ──
                 if hooks.consume_profile_cycle():
                     try:
+                        profile_mgr.current_profile.reset_controls(gamepad)
+                        hooks.reset_held_inputs()
                         active_prof = profile_mgr.cycle()
                         gamepad.reset()
                         gamepad.update()
+                        last_controller_state = None
+                        ticks_since_update = 0
                         print(f"[PROFILE] {active_prof.name}", flush=True)
                         logger.debug("Switched profile to: %s", active_prof.name)
                     except Exception as cyc_exc:
@@ -537,12 +543,16 @@ def run_mapper(argv: list[str] | None = None) -> int:
                         if active:
                             timer.reset()
                             profile_mgr.current_profile.mapper.reset()
+                            last_controller_state = None
+                            ticks_since_update = 0
                             print(f"[ON] Profile: {profile_mgr.current_profile.name}", flush=True)
                             logger.debug("Capture activated.")
                         else:
                             profile_mgr.current_profile.reset_controls(gamepad)
                             gamepad.reset()
                             gamepad.update()
+                            last_controller_state = None
+                            ticks_since_update = 0
                             print("[OFF] Mouse/KB Released", flush=True)
                             logger.debug("Capture deactivated.")
                     except Exception as trans_exc:
@@ -571,6 +581,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
 
                     # C. Buttons & Triggers: apply active profile mappings
                     lb, rb, mb, x1, x2 = hooks.get_mouse_buttons()
+                    wheel_delta = hooks.consume_wheel_delta()
                     prof.apply_buttons(
                         gamepad=gamepad,
                         keys_pressed=keys_pressed,
@@ -579,14 +590,36 @@ def run_mapper(argv: list[str] | None = None) -> int:
                         mbutton=mb,
                         xbutton1=x1,
                         xbutton2=x2,
+                        wheel_delta=wheel_delta,
                     )
 
-                    # D. Commit report to ViGEmBus
-                    gamepad.update()
+                    # D. Commit report to ViGEmBus if state changed or heartbeat reached
+                    rep = getattr(gamepad, "report", None)
+                    if rep is not None:
+                        current_state = (
+                            int(getattr(rep, "sThumbRX", rx)),
+                            int(getattr(rep, "sThumbRY", ry)),
+                            int(getattr(rep, "sThumbLX", lx)),
+                            int(getattr(rep, "sThumbLY", ly)),
+                            int(getattr(rep, "bLeftTrigger", 0)),
+                            int(getattr(rep, "bRightTrigger", 0)),
+                            int(getattr(rep, "wButtons", 0)),
+                        )
+                    else:
+                        current_state = (int(rx), int(ry), int(lx), int(ly), 0, 0, 0)
+
+                    ticks_since_update += 1
+                    if current_state != last_controller_state or ticks_since_update >= 25:
+                        gamepad.update()
+                        last_controller_state = current_state
+                        ticks_since_update = 0
+
                     consecutive_tick_errors = 0
 
                 except Exception as tick_exc:
                     consecutive_tick_errors += 1
+                    last_controller_state = None
+                    ticks_since_update = 0
                     # Failsafe: reset controller immediately to prevent stuck inputs
                     with contextlib.suppress(Exception):
                         gamepad.reset()

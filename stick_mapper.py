@@ -278,6 +278,7 @@ class MouseToStickMapper:
         "_alpha",
         "_sx",
         "_sy",
+        "_zero_ticks",
     )
 
     def __init__(
@@ -326,12 +327,14 @@ class MouseToStickMapper:
         # Internal smoothed stick vector (normalised ≈ [-1, 1])
         self._sx: float = 0.0
         self._sy: float = 0.0
+        self._zero_ticks: int = 0
 
     # ── public API ───────────────────────────────────────────────────────
 
     def reset(self) -> None:
         """Zero the internal stick state immediately."""
         self._sx = self._sy = 0.0
+        self._zero_ticks = 0
 
     def step(self, dx: int | float, dy: int | float, dt: float) -> tuple[int, int]:
         """Process one tick of mouse input.
@@ -358,34 +361,44 @@ class MouseToStickMapper:
         if not math.isfinite(dt) or dt < 0.0:
             dt = TARGET_DT
 
-        # 1 ── scale by sensitivity, clamp spikes ────────────────────────
+        # 1 ── scale by sensitivity, clamp spikes radially ────────────────
         cap = self.max_delta_per_tick
-        fdx: float = max(-cap, min(cap, float(dx) * self.sensitivity))
-        fdy: float = max(-cap, min(cap, float(dy) * self.sensitivity))
-        if not math.isfinite(fdx):
-            fdx = 0.0
-        if not math.isfinite(fdy):
-            fdy = 0.0
+        raw_fx = float(dx) * self.sensitivity
+        raw_fy = float(dy) * self.sensitivity
+        if not math.isfinite(raw_fx):
+            raw_fx = 0.0
+        if not math.isfinite(raw_fy):
+            raw_fy = 0.0
+        raw_mag = math.hypot(raw_fx, raw_fy)
+        if raw_mag > cap and raw_mag > 0.0:
+            scale = cap / raw_mag
+            fdx = raw_fx * scale
+            fdy = raw_fy * scale
+        else:
+            fdx, fdy = raw_fx, raw_fy
 
         # 2 ── EMA smooth (input present) / decay (idle) ─────────────────
         if dx != 0 or dy != 0:
+            self._zero_ticks = 0
             a = self._alpha
             one_minus_a = 1.0 - a
             self._sx = a * fdx + one_minus_a * self._sx
             self._sy = a * fdy + one_minus_a * self._sy
         else:
-            # Frame-rate-independent: decay_rate is calibrated per 250 Hz tick
-            ticks = dt * TARGET_HZ if dt > 0.0 else 1.0
-            ticks = max(0.0, min(1000.0, ticks))
-            decay = self.decay_rate ** ticks
-            if not math.isfinite(decay):
-                decay = 0.0
-            self._sx *= decay
-            self._sy *= decay
-            if abs(self._sx) < _EPSILON:
-                self._sx = 0.0
-            if abs(self._sy) < _EPSILON:
-                self._sy = 0.0
+            self._zero_ticks += 1
+            if self._zero_ticks > 1 or self.decay_rate == 0.0:
+                # Frame-rate-independent: decay_rate is calibrated per 250 Hz tick
+                ticks = dt * TARGET_HZ if dt > 0.0 else 1.0
+                ticks = max(0.0, min(1000.0, ticks))
+                decay = self.decay_rate ** ticks
+                if not math.isfinite(decay):
+                    decay = 0.0
+                self._sx *= decay
+                self._sy *= decay
+                if abs(self._sx) < _EPSILON:
+                    self._sx = 0.0
+                if abs(self._sy) < _EPSILON:
+                    self._sy = 0.0
 
         if not math.isfinite(self._sx):
             self._sx = 0.0
@@ -397,6 +410,11 @@ class MouseToStickMapper:
         r = math.hypot(sx, sy)
 
         if not math.isfinite(r) or r < _EPSILON:
+            return (0, 0)
+
+        # Eliminate deadzone drift tail when stopping
+        if self._zero_ticks > 1 and r < 0.02:
+            self._sx = self._sy = 0.0
             return (0, 0)
 
         # Power curve on normalized radial magnitude [0.0, 1.0]

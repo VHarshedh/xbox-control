@@ -33,6 +33,9 @@
         "VK_1": "XUSB_GAMEPAD_DPAD_UP",
         "VK_2": "XUSB_GAMEPAD_DPAD_RIGHT",
         "VK_3": "XUSB_GAMEPAD_DPAD_DOWN",
-        "VK_4": "XUSB_GAMEPAD_DPAD_LEFT"
+        "VK_4": "XUSB_GAMEPAD_DPAD_LEFT",
+        "WHEEL_UP": "XUSB_GAMEPAD_Y",
+        "WHEEL_DOWN": "XUSB_GAMEPAD_Y",
+        "VK_HOME": "XUSB_GAMEPAD_GUIDE"
     }
 }

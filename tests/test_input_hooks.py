@@ -18,13 +18,19 @@ from input_hooks import (
     CTRL_CLOSE_EVENT,
     CTRL_LOGOFF_EVENT,
     CTRL_SHUTDOWN_EVENT,
+    DEFAULT_PASSTHROUGH_KEYS,
     KBDLLHOOKSTRUCT,
+    LLKHF_ALTDOWN,
     LLKHF_INJECTED,
     LLKHF_LOWER_IL_INJECTED,
     LLMHF_LOWER_IL_INJECTED,
     MSLLHOOKSTRUCT,
     VK_F8,
     VK_F9,
+    VK_F11,
+    VK_LWIN,
+    VK_RWIN,
+    VK_TAB,
     WM_KEYDOWN,
     WM_KEYUP,
     WM_LBUTTONDBLCLK,
@@ -562,3 +568,127 @@ class TestMouseTrackingAndRecentering:
             assert cy == 540
             assert rc is not None
             assert rc.left == 1920 and rc.right == 3840
+
+
+class TestWindowSwitchAndPreCaptureKeys:
+    """Validate Alt+Tab / Win auto-deactivation, F11 passthrough, and pre-capture held key release."""
+
+    def test_alt_tab_auto_deactivation_and_passthrough(self) -> None:
+        toggled_states: list[bool] = []
+
+        def _on_toggle(st: bool) -> None:
+            toggled_states.append(st)
+
+        hooks = InputHooks(on_toggle=_on_toggle)
+        hooks._active = True
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_TAB
+        kbd.flags = LLKHF_ALTDOWN
+
+        with patch.object(input_hooks._user32, "CallNextHookEx", return_value=42) as mock_next:
+            res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+            assert res == 42
+            mock_next.assert_called_once()
+
+        assert hooks.active is False
+        assert toggled_states == [False]
+
+    def test_windows_key_auto_deactivation(self) -> None:
+        toggled_states: list[bool] = []
+
+        def _on_toggle(st: bool) -> None:
+            toggled_states.append(st)
+
+        for win_vk in (VK_LWIN, VK_RWIN):
+            toggled_states.clear()
+            hooks = InputHooks(on_toggle=_on_toggle)
+            hooks._active = True
+
+            kbd = KBDLLHOOKSTRUCT()
+            kbd.vkCode = win_vk
+            kbd.flags = 0
+
+            with patch.object(input_hooks._user32, "CallNextHookEx", return_value=42) as mock_next:
+                res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+                assert res == 42
+                mock_next.assert_called_once()
+
+            assert hooks.active is False
+            assert toggled_states == [False]
+
+    def test_pre_capture_held_key_release_passthrough(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+        # W key (0x57) was pressed BEFORE F8 capture, so it is NOT in _keys_down
+        assert 0x57 not in hooks._keys_down
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = 0x57
+        kbd.flags = 0
+
+        # When released (WM_KEYUP), must pass through so browser releases the key
+        with patch.object(input_hooks._user32, "CallNextHookEx", return_value=42) as mock_next:
+            res = hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd))
+            assert res == 42
+            mock_next.assert_called_once()
+
+    def test_in_capture_key_release_swallowed(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = 0x57  # 'W'
+        kbd.flags = 0
+
+        # Press down during capture -> recorded and swallowed
+        res_down = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert res_down == 1
+        assert 0x57 in hooks.get_keys_pressed()
+
+        # Release during capture -> discarded and swallowed
+        with patch.object(input_hooks._user32, "CallNextHookEx") as mock_next:
+            res_up = hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd))
+            assert res_up == 1
+            mock_next.assert_not_called()
+        assert 0x57 not in hooks.get_keys_pressed()
+
+    def test_f11_fullscreen_passthrough(self) -> None:
+        assert VK_F11 in DEFAULT_PASSTHROUGH_KEYS
+
+        hooks = InputHooks()
+        hooks._active = True
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_F11
+        kbd.flags = 0
+
+        with patch.object(input_hooks._user32, "CallNextHookEx", return_value=42) as mock_next:
+            res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+            assert res == 42
+            mock_next.assert_called_once()
+
+        # Capture remains active when F11 passes through
+        assert hooks.active is True
+
+    def test_reset_held_inputs(self) -> None:
+        hooks = InputHooks()
+        hooks._dx = 55
+        hooks._dy = -33
+        hooks._wheel_delta = 120
+        hooks._lbutton = True
+        hooks._rbutton = True
+        hooks._mbutton = True
+        hooks._xbutton1 = True
+        hooks._xbutton2 = True
+
+        hooks.reset_held_inputs()
+
+        assert hooks._dx == 0
+        assert hooks._dy == 0
+        assert hooks._wheel_delta == 0
+        assert hooks._lbutton is False
+        assert hooks._rbutton is False
+        assert hooks._mbutton is False
+        assert hooks._xbutton1 is False
+        assert hooks._xbutton2 is False

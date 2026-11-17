@@ -115,6 +115,66 @@ class TestMouseToStickMapper:
         # Magnitude is equal within 1 integer due to signed int16 [-32768, 32767] asymmetry
         assert abs(abs(ry_normal) - abs(ry_inverted)) <= 1
 
+    def test_radial_clamping_angle_preservation(self) -> None:
+        """Verify that radial vector clamping strictly preserves flick angle theta = atan2(dy, dx)."""
+        mapper = MouseToStickMapper(
+            sensitivity=0.10,
+            max_delta_per_tick=1.0,
+            smoothing=0.0,
+            deadzone_comp=0.0,
+            curve_exponent=1.0,
+            invert_y=False,
+        )
+        # Fast angled flick: dx=100, dy=50 (raw_fx=10.0, raw_fy=5.0 >> 1.0 cap)
+        rx, ry = mapper.step(100, 50, TARGET_DT)
+        # Note: screen-down +dy maps to stick -ry
+        expected_angle = math.atan2(50, 100)
+        actual_angle = math.atan2(-ry, rx)
+        assert math.isclose(actual_angle, expected_angle, rel_tol=1e-3, abs_tol=1e-3)
+        # Radial magnitude should hit max stick deflection (within integer rounding)
+        mag = math.hypot(rx, ry)
+        assert abs(mag - 32767) <= 2
+
+    def test_125hz_polling_zero_ticks_gap_bridging(self) -> None:
+        """125 Hz mice deliver inputs every 8 ms (alternate ticks at 250 Hz). First 0-tick must not decay."""
+        mapper = MouseToStickMapper(
+            sensitivity=0.05,
+            decay_rate=0.70,
+            smoothing=0.0,
+            deadzone_comp=0.0,
+            curve_exponent=1.0,
+        )
+        # Tick 1: movement
+        rx1, ry1 = mapper.step(10, 0, TARGET_DT)
+        assert rx1 > 0
+        # Tick 2: 125 Hz gap tick (dx=0, dy=0) -> zero_ticks=1, no decay applied
+        rx2, ry2 = mapper.step(0, 0, TARGET_DT)
+        assert rx2 == rx1
+        assert ry2 == ry1
+        # Tick 3: Genuine stop tick (dx=0, dy=0) -> zero_ticks=2, decay applies
+        rx3, ry3 = mapper.step(0, 0, TARGET_DT)
+        assert rx3 < rx2
+
+    def test_stopping_deadzone_drift_eliminated(self) -> None:
+        """When stopped (zero_ticks > 1) and r < 0.02, stick snaps immediately to (0, 0)."""
+        mapper = MouseToStickMapper(
+            sensitivity=0.01,
+            decay_rate=0.50,
+            deadzone_comp=0.20,
+            smoothing=0.0,
+            curve_exponent=1.0,
+        )
+        # Tiny movement producing r < 0.02
+        mapper.step(1, 0, TARGET_DT)
+        # Tick 2: first zero tick (bridges gap)
+        mapper.step(0, 0, TARGET_DT)
+        # Tick 3: second zero tick, r < 0.02 -> snap to (0, 0)
+        rx, ry = mapper.step(0, 0, TARGET_DT)
+        assert rx == 0
+        assert ry == 0
+        assert mapper._sx == 0.0
+        assert mapper._sy == 0.0
+
     def test_invalid_parameters(self) -> None:
         with pytest.raises(ValueError, match="sensitivity must be > 0"):
             MouseToStickMapper(sensitivity=-0.01)
