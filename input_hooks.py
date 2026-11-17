@@ -789,20 +789,13 @@ class InputHooks:
                         self._mouse_hook, nCode, wParam, lParam,
                     ))
 
-                # ── Movement → accumulate dx/dy, advance baseline, and recenter if needed ──
+                # ── Movement → accumulate dx/dy relative to screen center ──
                 if msg == WM_MOUSEMOVE:
                     x, y = mouse.pt.x, mouse.pt.y
-                    if self._last_pt is not None:
-                        self._dx += x - self._last_pt[0]
-                        self._dy += y - self._last_pt[1]
-                    self._last_pt = (x, y)
                     if self._center_pt is not None:
                         cx, cy = self._center_pt
-                        if (
-                            (abs(x - cx) > self._recenter_threshold or abs(y - cy) > self._recenter_threshold)
-                            and _user32.SetCursorPos(cx, cy)
-                        ):
-                            self._last_pt = (cx, cy)
+                        self._dx += x - cx
+                        self._dy += y - cy
                     return 1
 
                 # ── Standard buttons down (including double-clicks) ──

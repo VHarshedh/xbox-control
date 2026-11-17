@@ -17,17 +17,22 @@
     "buttons": {
         "MOUSE_LEFT": "RT",
         "MOUSE_RIGHT": "LT",
+        "MOUSE_MIDDLE": "XUSB_GAMEPAD_RIGHT_THUMB",
+        "MOUSE_X1": "XUSB_GAMEPAD_RIGHT_SHOULDER",
+        "MOUSE_X2": "XUSB_GAMEPAD_LEFT_SHOULDER",
         "VK_SPACE": "XUSB_GAMEPAD_A",
         "VK_LSHIFT": "XUSB_GAMEPAD_LEFT_THUMB",
-        "VK_E": "XUSB_GAMEPAD_X",
-        "VK_R": "XUSB_GAMEPAD_Y",
-        "VK_F": "XUSB_GAMEPAD_B",
+        "VK_R": "XUSB_GAMEPAD_X",
+        "VK_E": "XUSB_GAMEPAD_Y",
+        "VK_C": "XUSB_GAMEPAD_B",
+        "VK_F": "XUSB_GAMEPAD_RIGHT_THUMB",
         "VK_Q": "XUSB_GAMEPAD_LEFT_SHOULDER",
-        "VK_C": "XUSB_GAMEPAD_RIGHT_THUMB",
+        "VK_G": "XUSB_GAMEPAD_RIGHT_SHOULDER",
         "VK_TAB": "XUSB_GAMEPAD_BACK",
         "VK_ESCAPE": "XUSB_GAMEPAD_START",
-        "VK_Z": "XUSB_GAMEPAD_DPAD_LEFT",
-        "VK_X": "XUSB_GAMEPAD_DPAD_DOWN",
-        "VK_G": "XUSB_GAMEPAD_DPAD_RIGHT"
+        "VK_1": "XUSB_GAMEPAD_DPAD_UP",
+        "VK_2": "XUSB_GAMEPAD_DPAD_RIGHT",
+        "VK_3": "XUSB_GAMEPAD_DPAD_DOWN",
+        "VK_4": "XUSB_GAMEPAD_DPAD_LEFT"
     }
 }

@@ -374,45 +374,47 @@ class TestMouseTrackingAndRecentering:
     def test_mouse_movement_relative_delta_progression(self) -> None:
         hooks = InputHooks()
         hooks._active = True
+        hooks._center_pt = (100, 100)
         hooks._last_pt = (100, 100)
 
         ms = MSLLHOOKSTRUCT()
         ms.flags = 0
 
-        # Step 1: Move from 100 to 110 (+10)
+        # Step 1: Move from center (100, 100) by +10 in X
         ms.pt.x = 110
         ms.pt.y = 100
         hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
         dx1, dy1 = hooks.consume_mouse_delta()
         assert dx1 == 10
         assert dy1 == 0
-        assert hooks._last_pt == (110, 100)
+        assert hooks._last_pt == (100, 100)
 
-        # Step 2: Move from 110 to 125 (+15)
-        ms.pt.x = 125
+        # Step 2: Move from center by +15 in X
+        ms.pt.x = 115
         ms.pt.y = 100
         hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
         dx2, dy2 = hooks.consume_mouse_delta()
         assert dx2 == 15
         assert dy2 == 0
-        assert hooks._last_pt == (125, 100)
+        assert hooks._last_pt == (100, 100)
 
-        # Step 3: Reverse direction: move from 125 to 120 (-5)
-        ms.pt.x = 120
+        # Step 3: Reverse direction: move from center by -5 in X
+        ms.pt.x = 95
         ms.pt.y = 100
         hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
         dx3, dy3 = hooks.consume_mouse_delta()
         assert dx3 == -5
         assert dy3 == 0
-        assert hooks._last_pt == (120, 100)
+        assert hooks._last_pt == (100, 100)
 
-        # Step 4: Stationary event (same point 120, 100) -> delta must be 0
-        ms.pt.x = 120
+        # Step 4: Stationary event (at center 100, 100) -> delta must be 0
+        ms.pt.x = 100
         ms.pt.y = 100
         hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
         dx4, dy4 = hooks.consume_mouse_delta()
         assert dx4 == 0
         assert dy4 == 0
+        assert hooks._last_pt == (100, 100)
 
     def test_cursor_recentering_when_threshold_exceeded(self) -> None:
         hooks = InputHooks()
@@ -425,19 +427,27 @@ class TestMouseTrackingAndRecentering:
         ms.flags = 0
 
         with patch.object(input_hooks._user32, "SetCursorPos") as mock_set_cursor:
-            # Move by 50 px (< 150 threshold): no recentering
+            # Move by 50 px relative to center: return 1 swallows movement and keeps cursor anchored
             ms.pt.x = 1010
             ms.pt.y = 540
-            hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+            res = hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+            assert res == 1
             mock_set_cursor.assert_not_called()
-            assert hooks._last_pt == (1010, 540)
+            assert hooks._last_pt == (960, 540)
+            dx1, dy1 = hooks.consume_mouse_delta()
+            assert dx1 == 50
+            assert dy1 == 0
 
-            # Move by another 120 px to 1130 px (abs(1130 - 960) = 170 > 150): triggers recentering
+            # Large movement relative to center: remains anchored at center without SetCursorPos
             ms.pt.x = 1130
             ms.pt.y = 540
-            hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
-            mock_set_cursor.assert_called_once_with(960, 540)
+            res = hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+            assert res == 1
+            mock_set_cursor.assert_not_called()
             assert hooks._last_pt == (960, 540)
+            dx2, dy2 = hooks.consume_mouse_delta()
+            assert dx2 == 170
+            assert dy2 == 0
 
     def test_stop_unclips_cursor(self) -> None:
         hooks = InputHooks()
@@ -511,11 +521,11 @@ class TestMouseTrackingAndRecentering:
         ms.pt.x = 1200
         ms.pt.y = 540
 
-        # When SetCursorPos fails (returns 0/False)
+        # _last_pt remains anchored at _center_pt (960, 540)
         with patch.object(input_hooks._user32, "SetCursorPos", return_value=0):
-            hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
-            # _last_pt must remain the actual mouse coordinates (1200, 540), NOT falsely set to (960, 540)
-            assert hooks._last_pt == (1200, 540)
+            res = hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+            assert res == 1
+            assert hooks._last_pt == (960, 540)
 
     def test_multi_monitor_screen_center_detection(self) -> None:
         def fake_metrics(n: int) -> int:
