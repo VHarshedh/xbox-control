@@ -106,6 +106,11 @@ class TestProfileNameValidation:
             assert ok is False
             assert "forbidden characters" in reason
 
+    def test_trailing_period_rejected(self) -> None:
+        ok, reason = validate_profile_name("Shooter.")
+        assert ok is False
+        assert "cannot end with a period" in reason
+
 
 class TestCLIArgumentParsing:
     """Validate argument parsing behaviors and defaults."""
@@ -137,9 +142,26 @@ class TestCLIArgumentParsing:
         args2 = parse_args(["--verbose"])
         assert args2.verbose is True
 
+    def test_check_flag(self) -> None:
+        args = parse_args(["-c"])
+        assert args.check is True
+
+        args2 = parse_args(["--check"])
+        assert args2.check is True
+
 
 class TestListProfilesAndExecutionCLI:
     """Test CLI behavior under list-profiles and profile selection."""
+
+    def test_check_execution_success(self) -> None:
+        with patch.object(main, "verify_system_requirements", return_value=True):
+            code = run_mapper(["--check"])
+            assert code == 0
+
+    def test_check_execution_failure(self) -> None:
+        with patch.object(main, "verify_system_requirements", return_value=False):
+            code = run_mapper(["--check"])
+            assert code == 1
 
     def test_list_profiles_execution(self, capsys: pytest.CaptureFixture[str]) -> None:
         code = run_mapper(["--list-profiles"])
@@ -302,3 +324,54 @@ class TestMainLoopExceptionResilience:
 
         assert broken is True
         assert consecutive_tick_errors == MAX_CONSECUTIVE_TICK_ERRORS
+
+    def test_lifecycle_cleanup_clears_timer_period_count(self) -> None:
+        import stick_mapper
+        from stick_mapper import HighResTimer
+
+        initial_count = stick_mapper._period_active_count
+        with AppLifecycle() as lc:
+            timer = HighResTimer(hz=250.0)
+            lc.timer = timer
+            timer.__enter__()
+            lc.timer_entered = True
+            assert stick_mapper._period_active_count == initial_count + 1
+
+        assert stick_mapper._period_active_count == initial_count
+
+    def test_ci_flag_argument_and_check(self) -> None:
+        args = parse_args(["--check", "--ci"])
+        assert args.check is True
+        assert args.ci is True
+
+        with patch("main.verify_system_requirements", return_value=True) as mock_verify:
+            ret = run_mapper(["--check", "--ci"])
+            assert ret == 0
+            mock_verify.assert_called_once_with(ci_mode=True)
+
+    def test_profile_selection_normalized_matching(self) -> None:
+        with patch("main.verify_system_requirements", return_value=True), patch(
+            "vgamepad.VX360Gamepad"
+        ), patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer"):
+            instance = mock_hooks.return_value
+            instance.active = False
+            instance.consume_profile_cycle.return_value = False
+            instance.is_healthy = True
+
+            # Use -p RTS to verify it resolves to "RTS / Menu"
+            with patch("time.sleep", side_effect=KeyboardInterrupt):
+                ret = run_mapper(["-p", "RTS"])
+                assert ret == 0
+
+    def test_main_loop_detects_unhealthy_hook_subsystem(self) -> None:
+        with patch("main.verify_system_requirements", return_value=True), patch(
+            "vgamepad.VX360Gamepad"
+        ), patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer"):
+            instance = mock_hooks.return_value
+            instance.active = True
+            instance.consume_profile_cycle.return_value = False
+            # Simulate hook thread dying / becoming unhealthy
+            instance.is_healthy = False
+
+            ret = run_mapper([])
+            assert ret == 1

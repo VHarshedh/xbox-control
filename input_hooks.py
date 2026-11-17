@@ -207,6 +207,72 @@ _kernel32.GetLastError.argtypes = []
 _kernel32.GetLastError.restype = wt.DWORD
 
 
+# ── Multi-Monitor and Cursor Bounds Types ────────────────────────────────
+
+class MONITORINFO(ctypes.Structure):
+    """Win32 MONITORINFO structure."""
+    _fields_ = [
+        ("cbSize", wt.DWORD),
+        ("rcMonitor", wt.RECT),
+        ("rcWork", wt.RECT),
+        ("dwFlags", wt.DWORD),
+    ]
+
+
+_user32.MonitorFromPoint.argtypes = [wt.POINT, wt.DWORD]
+_user32.MonitorFromPoint.restype = ctypes.c_void_p
+
+_user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+_user32.GetMonitorInfoW.restype = wt.BOOL
+
+_user32.ClipCursor.argtypes = [ctypes.c_void_p]
+_user32.ClipCursor.restype = wt.BOOL
+
+
+def _get_screen_center(current_pt: tuple[int, int] | None = None) -> tuple[int, int, wt.RECT | None]:
+    """Calculate center coordinates for the screen or active monitor containing current_pt."""
+    try:
+        sm_cx = _user32.GetSystemMetrics(SM_CXSCREEN)
+        sm_cy = _user32.GetSystemMetrics(SM_CYSCREEN)
+        vx = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        vy = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        vw = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        vh = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        if vw <= 0 or vh <= 0:
+            vw = sm_cx if sm_cx > 0 else 1920
+            vh = sm_cy if sm_cy > 0 else 1080
+            vx, vy = 0, 0
+
+        # In multi-monitor setups (virtual screen exceeds primary monitor or negative origin),
+        # query the monitor nearest to current_pt.
+        is_multi_monitor = vw > sm_cx or vh > sm_cy or vx < 0 or vy < 0
+        if is_multi_monitor and current_pt is not None:
+            pt = wt.POINT(current_pt[0], current_pt[1])
+            # MONITOR_DEFAULTTONEAREST = 2
+            h_mon = _user32.MonitorFromPoint(pt, 2)
+            if h_mon:
+                mi = MONITORINFO()
+                mi.cbSize = ctypes.sizeof(MONITORINFO)
+                if _user32.GetMonitorInfoW(h_mon, ctypes.byref(mi)):
+                    rc = mi.rcMonitor
+                    if (
+                        rc.left >= vx
+                        and rc.top >= vy
+                        and rc.right <= vx + vw
+                        and rc.bottom <= vy + vh
+                        and rc.right > rc.left
+                        and rc.bottom > rc.top
+                    ):
+                        cx = (rc.left + rc.right) // 2
+                        cy = (rc.top + rc.bottom) // 2
+                        return (cx, cy, rc)
+
+        # Single monitor or fallback to primary monitor center
+        return (sm_cx // 2 if sm_cx > 0 else 960, sm_cy // 2 if sm_cy > 0 else 540, None)
+    except Exception:
+        return 960, 540, None
+
+
 # ── DPI Awareness Initialization ─────────────────────────────────────────
 
 def _enable_per_monitor_dpi_awareness() -> None:
@@ -295,10 +361,12 @@ class InputHooks:
         # Keyboard: set of currently-pressed virtual-key codes
         self._keys_down: set[int] = set()
 
-        # Mouse: accumulated deltas, button states, wheel
+        # Mouse: accumulated deltas, button states, wheel, recentering
         self._dx: int = 0
         self._dy: int = 0
         self._last_pt: tuple[int, int] | None = None
+        self._center_pt: tuple[int, int] | None = None
+        self._recenter_threshold: int = 150
         self._lbutton: bool = False
         self._rbutton: bool = False
         self._mbutton: bool = False
@@ -338,6 +406,19 @@ class InputHooks:
         """Whether input capture is currently active."""
         with self._lock:
             return self._active
+
+    @property
+    def is_healthy(self) -> bool:
+        """Check if the hook thread is alive and hooks remain installed."""
+        with self._cleanup_lock:
+            if not self._running:
+                return False
+            return bool(
+                self._thread is not None
+                and self._thread.is_alive()
+                and self._kb_hook != 0
+                and self._mouse_hook != 0
+            )
 
     # ── Consumer API (thread-safe) ───────────────────────────────────────
 
@@ -426,6 +507,7 @@ class InputHooks:
         # Reset active flag and clear buffers atomically under state lock
         with self._lock:
             self._active = False
+            self._center_pt = None
             self._keys_down.clear()
             self._last_pt = None
             self._dx = self._dy = self._wheel_delta = 0
@@ -435,19 +517,23 @@ class InputHooks:
             self._xbutton1 = False
             self._xbutton2 = False
 
+        # Release any cursor clipping or confinement
+        with contextlib.suppress(Exception):
+            _user32.ClipCursor(None)
+
         # Immediately detach hooks so OS ceases delivering events
         self._force_unhook()
 
-        # Tell the pump thread to exit
+        # Tell the pump thread to exit with retry loop if needed
         tid = self._thread_id
-        if tid:
-            with contextlib.suppress(Exception):
-                _user32.PostThreadMessageW(wt.DWORD(tid), WM_QUIT, 0, 0)
-
-        # Wait for pump thread to finish (avoid joining current thread)
         cur_thread = threading.current_thread()
-        if self._thread is not None and self._thread is not cur_thread and self._thread.is_alive():
-            self._thread.join(timeout=3.0)
+        if tid and self._thread is not None and self._thread is not cur_thread and self._thread.is_alive():
+            for _ in range(5):
+                if not self._thread.is_alive():
+                    break
+                with contextlib.suppress(Exception):
+                    _user32.PostThreadMessageW(wt.DWORD(tid), WM_QUIT, 0, 0)
+                self._thread.join(timeout=0.6)
 
         with contextlib.suppress(Exception):
             atexit.unregister(self.stop)
@@ -524,6 +610,8 @@ class InputHooks:
         if ms:
             with contextlib.suppress(Exception):
                 _user32.UnhookWindowsHookEx(ms)
+        with contextlib.suppress(Exception):
+            _user32.ClipCursor(None)
 
     # ── Hook Callbacks ───────────────────────────────────────────────────
 
@@ -555,32 +643,49 @@ class InputHooks:
                 if not is_injected:
                     if wParam in _KEY_DOWN_MSGS and not self._f8_held:
                         self._f8_held = True
-                        new_active = not self._active
+                        with self._lock:
+                            new_active = not self._active
 
-                        if new_active:
-                            # Center cursor *before* activating capture
-                            sm_cx = _user32.GetSystemMetrics(SM_CXSCREEN)
-                            sm_cy = _user32.GetSystemMetrics(SM_CYSCREEN)
-                            cx = (sm_cx // 2) if sm_cx > 0 else 960
-                            cy = (sm_cy // 2) if sm_cy > 0 else 540
-                            _user32.SetCursorPos(cx, cy)
-
-                            # Read and validate landed cursor coordinate within bounds
-                            landed = wt.POINT()
-                            actual_pt = (cx, cy)
-                            if _user32.GetCursorPos(ctypes.byref(landed)):
+                            if new_active:
+                                # Determine screen and virtual monitor bounds
                                 vx = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
                                 vy = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
                                 vw = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
                                 vh = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
                                 if vw <= 0 or vh <= 0:
+                                    sm_cx = _user32.GetSystemMetrics(SM_CXSCREEN)
+                                    sm_cy = _user32.GetSystemMetrics(SM_CYSCREEN)
                                     vx, vy = 0, 0
                                     vw = sm_cx if sm_cx > 0 else 1920
                                     vh = sm_cy if sm_cy > 0 else 1080
-                                if vx <= landed.x < vx + vw and vy <= landed.y < vy + vh:
+
+                                # Query cursor coordinate on monitor before moving
+                                cur_pt = wt.POINT()
+                                cur_xy = None
+                                if (
+                                    _user32.GetCursorPos(ctypes.byref(cur_pt))
+                                    and vx <= cur_pt.x < vx + vw
+                                    and vy <= cur_pt.y < vy + vh
+                                ):
+                                    cur_xy = (cur_pt.x, cur_pt.y)
+
+                                cx, cy, rc_mon = _get_screen_center(cur_xy)
+                                _user32.SetCursorPos(cx, cy)
+                                if rc_mon is not None:
+                                    with contextlib.suppress(Exception):
+                                        _user32.ClipCursor(ctypes.byref(rc_mon))
+
+                                # Read and validate landed cursor coordinate within bounds
+                                landed = wt.POINT()
+                                actual_pt = (cx, cy)
+                                if (
+                                    _user32.GetCursorPos(ctypes.byref(landed))
+                                    and vx <= landed.x < vx + vw
+                                    and vy <= landed.y < vy + vh
+                                ):
                                     actual_pt = (landed.x, landed.y)
 
-                            with self._lock:
+                                self._center_pt = actual_pt
                                 self._last_pt = actual_pt
                                 self._dx = self._dy = 0
                                 self._lbutton = False
@@ -591,9 +696,9 @@ class InputHooks:
                                 self._wheel_delta = 0
                                 self._keys_down.clear()
                                 self._active = True
-                        else:
-                            with self._lock:
+                            else:
                                 self._active = False
+                                self._center_pt = None
                                 self._keys_down.clear()
                                 self._last_pt = None
                                 self._lbutton = False
@@ -603,6 +708,9 @@ class InputHooks:
                                 self._xbutton2 = False
                                 self._dx = self._dy = 0
                                 self._wheel_delta = 0
+
+                                with contextlib.suppress(Exception):
+                                    _user32.ClipCursor(None)
 
                         if self._on_toggle is not None:
                             with contextlib.suppress(Exception):
@@ -669,73 +777,81 @@ class InputHooks:
                 lParam, ctypes.POINTER(MSLLHOOKSTRUCT),
             ).contents
 
-            # Ignore injected synthetic events (e.g. from SetCursorPos or SendInput)
+            # Ignore injected synthetic events (e.g. from SendInput)
             if mouse.flags & LLMHF_INJECTED_MASK:
                 return 1
 
             msg: int = wParam
 
-            # ── Movement → accumulate dx/dy without overwriting baseline ──
-            if msg == WM_MOUSEMOVE:
-                x, y = mouse.pt.x, mouse.pt.y
-                with self._lock:
+            with self._lock:
+                if not self._active:
+                    return int(_user32.CallNextHookEx(
+                        self._mouse_hook, nCode, wParam, lParam,
+                    ))
+
+                # ── Movement → accumulate dx/dy, advance baseline, and recenter if needed ──
+                if msg == WM_MOUSEMOVE:
+                    x, y = mouse.pt.x, mouse.pt.y
                     if self._last_pt is not None:
                         self._dx += x - self._last_pt[0]
                         self._dy += y - self._last_pt[1]
-                return 1
+                    self._last_pt = (x, y)
+                    if self._center_pt is not None:
+                        cx, cy = self._center_pt
+                        if (
+                            (abs(x - cx) > self._recenter_threshold or abs(y - cy) > self._recenter_threshold)
+                            and _user32.SetCursorPos(cx, cy)
+                        ):
+                            self._last_pt = (cx, cy)
+                    return 1
 
-            # ── Standard buttons down (including double-clicks) ──
-            btn = _BTN_DOWN_MAP.get(msg)
-            if btn is not None:
-                with self._lock:
+                # ── Standard buttons down (including double-clicks) ──
+                btn = _BTN_DOWN_MAP.get(msg)
+                if btn is not None:
                     if btn == "left":
                         self._lbutton = True
                     elif btn == "right":
                         self._rbutton = True
                     else:
                         self._mbutton = True
-                return 1
+                    return 1
 
-            # ── Standard buttons up ──
-            btn = _BTN_UP_MAP.get(msg)
-            if btn is not None:
-                with self._lock:
+                # ── Standard buttons up ──
+                btn = _BTN_UP_MAP.get(msg)
+                if btn is not None:
                     if btn == "left":
                         self._lbutton = False
                     elif btn == "right":
                         self._rbutton = False
                     else:
                         self._mbutton = False
-                return 1
+                    return 1
 
-            # ── X buttons down (thumb buttons, including double-clicks) ──
-            if msg in (WM_XBUTTONDOWN, WM_XBUTTONDBLCLK):
-                xbtn = (mouse.mouseData >> 16) & 0xFFFF
-                with self._lock:
+                # ── X buttons down (thumb buttons, including double-clicks) ──
+                if msg in (WM_XBUTTONDOWN, WM_XBUTTONDBLCLK):
+                    xbtn = (mouse.mouseData >> 16) & 0xFFFF
                     if xbtn & XBUTTON1:
                         self._xbutton1 = True
                     if xbtn & XBUTTON2:
                         self._xbutton2 = True
-                return 1
+                    return 1
 
-            # ── X buttons up ──
-            if msg == WM_XBUTTONUP:
-                xbtn = (mouse.mouseData >> 16) & 0xFFFF
-                with self._lock:
+                # ── X buttons up ──
+                if msg == WM_XBUTTONUP:
+                    xbtn = (mouse.mouseData >> 16) & 0xFFFF
                     if xbtn & XBUTTON1:
                         self._xbutton1 = False
                     if xbtn & XBUTTON2:
                         self._xbutton2 = False
-                return 1
+                    return 1
 
-            # ── Mouse wheel (signed 16-bit delta via bitwise extraction) ──
-            if msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
-                raw: int = mouse.mouseData
-                hiword: int = (raw >> 16) & 0xFFFF
-                delta: int = hiword if hiword < 0x8000 else hiword - 0x10000
-                with self._lock:
+                # ── Mouse wheel (signed 16-bit delta via bitwise extraction) ──
+                if msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
+                    raw: int = mouse.mouseData
+                    hiword: int = (raw >> 16) & 0xFFFF
+                    delta: int = hiword if hiword < 0x8000 else hiword - 0x10000
                     self._wheel_delta += delta
-                return 1
+                    return 1
 
             return 1
 

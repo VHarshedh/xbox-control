@@ -23,13 +23,16 @@ from typing import Any
 import vgamepad as vg
 
 from driver_check import (
+    check_architecture,
     check_python_version,
+    check_vgamepad_controller,
     check_vigembus_service,
     check_windows_os,
+    is_headless_ci,
 )
 from input_hooks import VK_F8, InputHookManager
 from profiles import ProfileManager
-from stick_mapper import TARGET_HZ, HighResTimer, _winmm
+from stick_mapper import TARGET_HZ, HighResTimer, _track_period_released, _winmm
 
 logger = logging.getLogger("vg_mapper")
 
@@ -110,6 +113,9 @@ def validate_profile_name(name: str) -> tuple[bool, str]:
     if "/" in stripped or "\\" in stripped or ".." in stripped:
         return False, "Profile name contains forbidden path separators or traversal components ('..')."
 
+    if stripped.endswith("."):
+        return False, "Profile name cannot end with a period."
+
     # Check for reserved Windows device names (e.g. CON, NUL, COM1, CON.json)
     base_stem = Path(stripped).stem.upper()
     if base_stem in _RESERVED_DEVICE_NAMES:
@@ -128,6 +134,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for profile selection, listing, and verbosity."""
     parser = argparse.ArgumentParser(
         description="High-performance mouse & keyboard to Xbox 360 virtual controller mapper."
+    )
+    parser.add_argument(
+        "--check",
+        "-c",
+        action="store_true",
+        help="Verify system requirements, driver status, and exit",
+    )
+    parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="Run in headless CI mode (skips physical driver checks if absent)",
     )
     parser.add_argument(
         "--profile",
@@ -267,9 +284,12 @@ class AppLifecycle:
                 with contextlib.suppress(Exception):
                     if _winmm is not None:
                         _winmm.timeEndPeriod(ctypes.c_uint(1))
+                        _track_period_released()
                     elif self.timer is not None:
                         self.timer.__exit__(None, None, None)
-                self.timer = None
+                if self.timer is not None:
+                    self.timer._is_active = False
+                    self.timer = None
 
             # 5. Restore handlers
             if self._console_ctrl_routine is not None and _kernel32 is not None:
@@ -303,12 +323,14 @@ class AppLifecycle:
 # ── System Verification ──────────────────────────────────────────────────
 
 
-def verify_system_requirements() -> bool:
-    """Verify Python, Windows OS, and ViGEmBus kernel driver status."""
+def verify_system_requirements(ci_mode: bool = False) -> bool:
+    """Verify Python, architecture, Windows OS, ViGEmBus kernel driver, and controller creation."""
     checks = [
         ("Python version", check_python_version()),
+        ("Architecture", check_architecture()),
         ("Windows OS", check_windows_os()),
-        ("ViGEmBus service", check_vigembus_service()),
+        ("ViGEmBus service", check_vigembus_service(ci_mode=ci_mode)),
+        ("vgamepad controller", check_vgamepad_controller(ci_mode=ci_mode)),
     ]
 
     for label, (ok, detail) in checks:
@@ -336,6 +358,15 @@ def run_mapper(argv: list[str] | None = None) -> int:
     )
 
     profiles_dir = Path(__file__).parent / "profiles"
+
+    ci_mode = args.ci or is_headless_ci()
+
+    # Handle --check
+    if args.check:
+        ok = verify_system_requirements(ci_mode=ci_mode)
+        if ok:
+            print("[PASS] System requirements and ViGEmBus driver verification succeeded.")
+        return 0 if ok else 1
 
     # Handle --list-profiles
     if args.list_profiles:
@@ -379,7 +410,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
     print("=" * 60)
 
     # 1. Subsystem and Driver Validation
-    if not verify_system_requirements():
+    if not verify_system_requirements(ci_mode=ci_mode):
         print("\nInitialization failed. Resolve the driver/system issue above.", file=sys.stderr)
         return 1
 
@@ -398,6 +429,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
     if args.profile is not None:
         target = args.profile.strip().lower()
         matched_idx: int | None = None
+        # 1. Exact match (case-insensitive) against name, stem, or filename
         for idx, prof in enumerate(profile_mgr.profiles):
             if (
                 prof.name.lower() == target
@@ -406,6 +438,21 @@ def run_mapper(argv: list[str] | None = None) -> int:
             ):
                 matched_idx = idx
                 break
+
+        # 2. Normalized alphanumeric match (e.g. "rts" matches "RTS / Menu" or "rts_menu")
+        if matched_idx is None:
+            norm_target = "".join(c for c in target if c.isalnum())
+            if norm_target:
+                for idx, prof in enumerate(profile_mgr.profiles):
+                    norm_name = "".join(c for c in prof.name.lower() if c.isalnum())
+                    norm_stem = "".join(c for c in prof.file_path.stem.lower() if c.isalnum())
+                    if (
+                        norm_target in (norm_name, norm_stem)
+                        or norm_name.startswith(norm_target)
+                        or norm_stem.startswith(norm_target)
+                    ):
+                        matched_idx = idx
+                        break
 
         if matched_idx is None:
             available = ", ".join(p.name for p in profile_mgr.profiles)
@@ -467,6 +514,10 @@ def run_mapper(argv: list[str] | None = None) -> int:
 
         try:
             while not lifecycle.shutdown_event.is_set():
+                if not hooks.is_healthy:
+                    logger.error("Low-level Win32 hook subsystem terminated unexpectedly. Shutting down.")
+                    return 1
+
                 # ── Profile cycling hotkey check (F9 consumed from hook thread) ──
                 if hooks.consume_profile_cycle():
                     try:
@@ -489,6 +540,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
                             print(f"[ON] Profile: {profile_mgr.current_profile.name}", flush=True)
                             logger.debug("Capture activated.")
                         else:
+                            profile_mgr.current_profile.reset_controls(gamepad)
                             gamepad.reset()
                             gamepad.update()
                             print("[OFF] Mouse/KB Released", flush=True)
@@ -559,9 +611,9 @@ def run_mapper(argv: list[str] | None = None) -> int:
                         if _user32 is not None:
                             with contextlib.suppress(Exception):
                                 _user32.ClipCursor(None)
-                        if hasattr(hooks, "_active"):
-                            hooks._active = False
-                        break
+                        with contextlib.suppress(Exception):
+                            hooks.stop()
+                        return 1
 
         except KeyboardInterrupt:
             print("\nShutdown requested by user (Ctrl+C).")

@@ -147,8 +147,8 @@ class HighResTimer:
         if not self._is_active:
             if _winmm is not None:
                 _winmm.timeBeginPeriod(ctypes.c_uint(1))
+                _track_period_acquired()
             self._is_active = True
-            _track_period_acquired()
         self.reset()
         return self
 
@@ -160,8 +160,8 @@ class HighResTimer:
         if getattr(self, "_is_active", False):
             if _winmm is not None:
                 _winmm.timeEndPeriod(ctypes.c_uint(1))
+                _track_period_released()
             self._is_active = False
-            _track_period_released()
 
     def __del__(self) -> None:
         self.close()
@@ -198,7 +198,7 @@ class HighResTimer:
             # else: tight spin for sub-ms precision (<0.5 ms)
 
         now = time.perf_counter()
-        dt = now - self._last
+        dt = max(0.0, now - self._last)
         self._last = now
         self._next = target + self._dt
 

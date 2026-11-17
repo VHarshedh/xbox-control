@@ -99,8 +99,13 @@ Designed for PC gaming, remote play, and accessibility with strict memory limits
 1. **Verify ViGEmBus Driver**:
    ```pwsh
    python driver_check.py
+   # Or in headless CI:
+   python driver_check.py --ci
+   # Service management (with optional UAC auto-elevation):
+   python driver_check.py --start-service --elevate
+   python driver_check.py --restart-service --elevate
    ```
-   Ensure all 4 diagnostics report `[✔] PASS`.
+   Ensure all 5 diagnostics report `[✔] PASS`.
 
 2. **Install Dependencies**:
    ```pwsh
@@ -126,8 +131,10 @@ python main.py
 ```
 options:
   -h, --help            Show this help message and exit
+  --check, -c           Verify system requirements, driver status, and exit
+  --ci                  Run in headless CI mode (skips physical driver checks if absent)
   --profile PROFILE, -p PROFILE
-                        Initial profile name or filename (default: Shooter)
+                        Initial profile name or filename (default: Shooter, supports normalized match like 'RTS')
   --list-profiles, -l   List all available profiles and exit
   --verbose, -v         Enable detailed diagnostic logging
 ```

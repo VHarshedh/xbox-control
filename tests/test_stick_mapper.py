@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import math
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -204,6 +205,96 @@ class TestDLLLoadingAndServiceSecurity:
             mock_advapi.CloseServiceHandle.assert_any_call(mock_scm)
             assert mock_advapi.CloseServiceHandle.call_count == 2
 
+    def test_driver_check_is_admin(self) -> None:
+        with patch("ctypes.windll.shell32.IsUserAnAdmin", return_value=1):
+            assert driver_check.is_admin() is True
+        with patch("ctypes.windll.shell32.IsUserAnAdmin", return_value=0):
+            assert driver_check.is_admin() is False
+
+    def test_driver_check_check_architecture(self) -> None:
+        ok, msg = driver_check.check_architecture()
+        assert ok is True
+        assert "64-bit" in msg
+
+    def test_driver_check_is_headless_ci(self) -> None:
+        with patch.dict("os.environ", {"CI": "true"}):
+            assert driver_check.is_headless_ci() is True
+        with patch.dict("os.environ", {"VGAMEPAD_SKIP_VIGEMBUS_INSTALL": "1"}):
+            assert driver_check.is_headless_ci() is True
+        with patch.dict("os.environ", {"CI": "", "GITHUB_ACTIONS": "", "VGAMEPAD_SKIP_VIGEMBUS_INSTALL": ""}):
+            assert driver_check.is_headless_ci() is False
+
+    def test_driver_check_cli_ci_and_admin(self) -> None:
+        # CLI --check-admin
+        with patch("driver_check.is_admin", return_value=True):
+            assert driver_check.main(["--check-admin"]) == 0
+        with patch("driver_check.is_admin", return_value=False):
+            assert driver_check.main(["--check-admin"]) == 1
+
+        # CLI --ci
+        with patch("driver_check.check_vigembus_service", return_value=(True, "OK")), patch(
+            "driver_check.check_vgamepad_controller", return_value=(True, "OK")
+        ):
+            assert driver_check.main(["--ci"]) == 0
+
+    def test_driver_check_start_service_permission_guard(self) -> None:
+        # When service is not running and user is not admin
+        with patch("driver_check.check_vigembus_service", return_value=(False, "Stopped")), patch(
+            "driver_check.is_admin", return_value=False
+        ):
+            ok, msg = driver_check.start_vigembus_service()
+            assert ok is False
+            assert "Administrator privileges required" in msg
+
+    def test_driver_check_elevate_with_service_arguments(self) -> None:
+        with patch("driver_check.is_admin", return_value=False), patch(
+            "driver_check.elevate_and_run", return_value=True
+        ) as mock_elevate:
+            ret = driver_check.main(["--start-service", "--elevate"])
+            assert ret == 0
+            mock_elevate.assert_called_once_with(extra_args=["--start-service"])
+
+    def test_driver_check_admin_with_elevate_and_start_service(self) -> None:
+        with patch("driver_check.is_admin", return_value=True), patch(
+            "driver_check.start_vigembus_service", return_value=(True, "Started OK")
+        ) as mock_start:
+            ret = driver_check.main(["--start-service", "--elevate"])
+            assert ret == 0
+            mock_start.assert_called_once()
+
+    def test_driver_check_stop_service_polls_pending(self) -> None:
+        mock_advapi = MagicMock()
+        mock_scm = 100
+        mock_svc = 200
+        mock_advapi.OpenSCManagerW.return_value = mock_scm
+        mock_advapi.OpenServiceW.return_value = mock_svc
+
+        # Status sequence: first query -> SERVICE_STOP_PENDING (3), second query -> SERVICE_STOPPED (1)
+        st_pending = driver_check.SERVICE_STATUS()
+        st_pending.dwCurrentState = driver_check.SERVICE_STOP_PENDING
+        st_stopped = driver_check.SERVICE_STATUS()
+        st_stopped.dwCurrentState = driver_check.SERVICE_STOPPED
+
+        def fake_query(svc: Any, p_st: Any) -> int:
+            st = getattr(p_st, "_obj", getattr(p_st, "contents", None))
+            if not hasattr(fake_query, "called"):
+                fake_query.called = True  # type: ignore[attr-defined]
+                if st is not None:
+                    st.dwCurrentState = driver_check.SERVICE_STOP_PENDING
+            else:
+                if st is not None:
+                    st.dwCurrentState = driver_check.SERVICE_STOPPED
+            return 1
+
+        mock_advapi.QueryServiceStatus.side_effect = fake_query
+
+        with patch("driver_check.is_admin", return_value=True), patch(
+            "driver_check._load_advapi32", return_value=mock_advapi
+        ), patch("time.sleep"):
+            ok, msg = driver_check.stop_vigembus_service()
+            assert ok is True
+            assert "stopped successfully" in msg
+
 
 class TestMathAndSignalSafety:
     """Validate numerical boundary conditions, extreme floats, and zero division guards."""
@@ -318,6 +409,22 @@ class TestHighResTimerSafety:
         with patch("time.perf_counter", return_value=fake_now), patch("time.sleep"):
             timer.wait()
             assert timer._next == fake_now + timer._dt
+
+    def test_timer_nowinmm_period_tracking(self) -> None:
+        timer = HighResTimer(hz=TARGET_HZ)
+        initial_count = stick_mapper._period_active_count
+        with patch("stick_mapper._winmm", None):
+            with timer:
+                assert stick_mapper._period_active_count == initial_count
+            assert stick_mapper._period_active_count == initial_count
+
+    def test_timer_wait_negative_dt_guard(self) -> None:
+        timer = HighResTimer(hz=TARGET_HZ)
+        timer._next = 10.0
+        timer._last = 10.5  # Last tick was recorded in the future (e.g. system clock stepped back)
+        with patch("time.perf_counter", return_value=10.0), patch("time.sleep"):
+            dt = timer.wait()
+            assert dt == 0.0
 
 
 class TestHookSecurityAndReentrancy:

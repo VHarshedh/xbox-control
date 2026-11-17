@@ -206,8 +206,8 @@ def parse_vk(val: int | str) -> int:
         )
 
     if isinstance(val, int):
-        if not (0 <= val <= 255):
-            raise ValueError(f"VK code out of byte range [0, 255]: {val}")
+        if not (1 <= val <= 255):
+            raise ValueError(f"VK code out of byte range [1, 255]: {val}")
         return val
 
     s = val.strip()
@@ -216,8 +216,8 @@ def parse_vk(val: int | str) -> int:
 
     if s.isdigit():
         code = int(s)
-        if not (0 <= code <= 255):
-            raise ValueError(f"VK code out of byte range [0, 255]: {val!r}")
+        if not (1 <= code <= 255):
+            raise ValueError(f"VK code out of byte range [1, 255]: {val!r}")
         return code
 
     if s.startswith(("0x", "0X")):
@@ -225,8 +225,8 @@ def parse_vk(val: int | str) -> int:
             code = int(s, 16)
         except ValueError as err:
             raise ValueError(f"Invalid hexadecimal VK code: {val!r}") from err
-        if not (0 <= code <= 255):
-            raise ValueError(f"VK code out of byte range [0, 255]: {val!r}")
+        if not (1 <= code <= 255):
+            raise ValueError(f"VK code out of byte range [1, 255]: {val!r}")
         return code
 
     upper = s.upper()
@@ -656,21 +656,47 @@ class ProfileManager:
             raise FileNotFoundError(f"No .json profile files found in {self.profiles_dir}")
 
         loaded: list[Profile] = []
+        errors: list[str] = []
         for p in json_files:
-            profile = self.load_profile(p, base_dir=self.profiles_dir)
-            loaded.append(profile)
+            try:
+                profile = self.load_profile(p, base_dir=self.profiles_dir)
+                loaded.append(profile)
+            except Exception as err:
+                errors.append(f"{p.name}: {err}")
+
+        if not loaded:
+            raise ValueError(f"No valid profiles found in {self.profiles_dir}. Errors: {errors}")
 
         self.profiles = loaded
 
         # Set default active profile if requested
         if default_name:
             target = default_name.strip().lower()
+            matched_idx: int | None = None
             for idx, prof in enumerate(self.profiles):
-                if prof.name.lower() == target or prof.file_path.stem.lower() == target:
-                    self.current_index = idx
+                if (
+                    prof.name.lower() == target
+                    or prof.file_path.stem.lower() == target
+                    or prof.file_path.name.lower() == target
+                ):
+                    matched_idx = idx
                     break
-            else:
-                self.current_index = 0
+
+            if matched_idx is None:
+                norm_target = "".join(c for c in target if c.isalnum())
+                if norm_target:
+                    for idx, prof in enumerate(self.profiles):
+                        norm_name = "".join(c for c in prof.name.lower() if c.isalnum())
+                        norm_stem = "".join(c for c in prof.file_path.stem.lower() if c.isalnum())
+                        if (
+                            norm_target in (norm_name, norm_stem)
+                            or norm_name.startswith(norm_target)
+                            or norm_stem.startswith(norm_target)
+                        ):
+                            matched_idx = idx
+                            break
+
+            self.current_index = matched_idx if matched_idx is not None else 0
         else:
             self.current_index = 0
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ctypes
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import input_hooks
 from input_hooks import (
@@ -366,3 +366,189 @@ class TestEdgeCasesMessageProcessing:
         dx, dy = hooks.consume_mouse_delta()
         assert dx == 0
         assert dy == 0
+
+
+class TestMouseTrackingAndRecentering:
+    """Validate mouse delta tracking, baseline progression, and cursor recentering."""
+
+    def test_mouse_movement_relative_delta_progression(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._last_pt = (100, 100)
+
+        ms = MSLLHOOKSTRUCT()
+        ms.flags = 0
+
+        # Step 1: Move from 100 to 110 (+10)
+        ms.pt.x = 110
+        ms.pt.y = 100
+        hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+        dx1, dy1 = hooks.consume_mouse_delta()
+        assert dx1 == 10
+        assert dy1 == 0
+        assert hooks._last_pt == (110, 100)
+
+        # Step 2: Move from 110 to 125 (+15)
+        ms.pt.x = 125
+        ms.pt.y = 100
+        hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+        dx2, dy2 = hooks.consume_mouse_delta()
+        assert dx2 == 15
+        assert dy2 == 0
+        assert hooks._last_pt == (125, 100)
+
+        # Step 3: Reverse direction: move from 125 to 120 (-5)
+        ms.pt.x = 120
+        ms.pt.y = 100
+        hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+        dx3, dy3 = hooks.consume_mouse_delta()
+        assert dx3 == -5
+        assert dy3 == 0
+        assert hooks._last_pt == (120, 100)
+
+        # Step 4: Stationary event (same point 120, 100) -> delta must be 0
+        ms.pt.x = 120
+        ms.pt.y = 100
+        hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+        dx4, dy4 = hooks.consume_mouse_delta()
+        assert dx4 == 0
+        assert dy4 == 0
+
+    def test_cursor_recentering_when_threshold_exceeded(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._center_pt = (960, 540)
+        hooks._last_pt = (960, 540)
+        hooks._recenter_threshold = 150
+
+        ms = MSLLHOOKSTRUCT()
+        ms.flags = 0
+
+        with patch.object(input_hooks._user32, "SetCursorPos") as mock_set_cursor:
+            # Move by 50 px (< 150 threshold): no recentering
+            ms.pt.x = 1010
+            ms.pt.y = 540
+            hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+            mock_set_cursor.assert_not_called()
+            assert hooks._last_pt == (1010, 540)
+
+            # Move by another 120 px to 1130 px (abs(1130 - 960) = 170 > 150): triggers recentering
+            ms.pt.x = 1130
+            ms.pt.y = 540
+            hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+            mock_set_cursor.assert_called_once_with(960, 540)
+            assert hooks._last_pt == (960, 540)
+
+    def test_stop_unclips_cursor(self) -> None:
+        hooks = InputHooks()
+        with patch.object(input_hooks._user32, "ClipCursor") as mock_clip:
+            hooks.stop()
+            mock_clip.assert_called_with(None)
+
+    def test_concurrent_f8_toggle_and_mouse_move(self) -> None:
+        """Stress test rapid F8 toggles (50 Hz) concurrent with continuous mouse moves."""
+        import threading
+        import time
+
+        hooks = InputHooks()
+        kbd_down = KBDLLHOOKSTRUCT(vkCode=VK_F8, flags=0)
+        kbd_up = KBDLLHOOKSTRUCT(vkCode=VK_F8, flags=0)
+        errors: list[str] = []
+
+        def toggle_worker() -> None:
+            for _ in range(100):
+                hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd_down))
+                hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd_up))
+                time.sleep(0.001)
+
+        def mouse_worker() -> None:
+            ms = MSLLHOOKSTRUCT()
+            for i in range(500):
+                ms.pt.x = i % 300
+                ms.pt.y = i % 300
+                hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+                if not hooks.active and hooks._last_pt is not None:
+                    errors.append(f"Stale _last_pt while inactive: {hooks._last_pt}")
+
+        t1 = threading.Thread(target=toggle_worker)
+        t2 = threading.Thread(target=mouse_worker)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert errors == [], f"Detected race conditions: {errors[:5]}"
+
+    def test_hook_is_healthy_property(self) -> None:
+        hooks = InputHooks()
+        assert hooks.is_healthy is False
+        hooks._running = True
+        mock_thread = MagicMock()
+        mock_thread.is_alive.return_value = True
+        hooks._thread = mock_thread
+        hooks._kb_hook = 101
+        hooks._mouse_hook = 202
+        assert hooks.is_healthy is True
+
+        # If thread dies
+        mock_thread.is_alive.return_value = False
+        assert hooks.is_healthy is False
+
+        # If unhooked
+        mock_thread.is_alive.return_value = True
+        hooks._kb_hook = 0
+        assert hooks.is_healthy is False
+
+    def test_setcursorpos_failure_does_not_corrupt_last_pt(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._center_pt = (960, 540)
+        hooks._last_pt = (960, 540)
+        hooks._recenter_threshold = 150
+
+        ms = MSLLHOOKSTRUCT()
+        ms.flags = 0
+        ms.pt.x = 1200
+        ms.pt.y = 540
+
+        # When SetCursorPos fails (returns 0/False)
+        with patch.object(input_hooks._user32, "SetCursorPos", return_value=0):
+            hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+            # _last_pt must remain the actual mouse coordinates (1200, 540), NOT falsely set to (960, 540)
+            assert hooks._last_pt == (1200, 540)
+
+    def test_multi_monitor_screen_center_detection(self) -> None:
+        def fake_metrics(n: int) -> int:
+            if n == 0:  # SM_CXSCREEN
+                return 1920
+            if n == 1:  # SM_CYSCREEN
+                return 1080
+            if n == 76:  # SM_XVIRTUALSCREEN
+                return 0
+            if n == 77:  # SM_YVIRTUALSCREEN
+                return 0
+            if n == 78:  # SM_CXVIRTUALSCREEN (dual 1080p monitors)
+                return 3840
+            if n == 79:  # SM_CYVIRTUALSCREEN
+                return 1080
+            return 0
+
+        # Cursor is on monitor 2 at x=2500, y=500
+        # Monitor 2 is from 1920 to 3840, center is (2880, 540)
+        def fake_get_monitor_info(h: Any, p_mi: Any) -> int:
+            mi = getattr(p_mi, "_obj", getattr(p_mi, "contents", None))
+            if mi is not None:
+                mi.rcMonitor.left = 1920
+                mi.rcMonitor.top = 0
+                mi.rcMonitor.right = 3840
+                mi.rcMonitor.bottom = 1080
+            return 1
+
+        with patch.object(input_hooks._user32, "GetSystemMetrics", side_effect=fake_metrics), patch.object(
+            input_hooks._user32, "MonitorFromPoint", return_value=12345
+        ), patch.object(input_hooks._user32, "GetMonitorInfoW", side_effect=fake_get_monitor_info):
+            cx, cy, rc = input_hooks._get_screen_center((2500, 500))
+            assert cx == 2880
+            assert cy == 540
+            assert rc is not None
+            assert rc.left == 1920 and rc.right == 3840

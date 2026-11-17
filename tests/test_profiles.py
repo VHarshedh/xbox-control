@@ -62,6 +62,16 @@ class TestVKParsing:
         with pytest.raises(ValueError, match="VK code out of byte range"):
             parse_vk("0xFFFF")
 
+    def test_parse_vk_zero_rejected(self) -> None:
+        with pytest.raises(ValueError, match="VK code out of byte range"):
+            parse_vk(0)
+
+        with pytest.raises(ValueError, match="VK code out of byte range"):
+            parse_vk("0")
+
+        with pytest.raises(ValueError, match="VK code out of byte range"):
+            parse_vk("0x00")
+
 
 class TestTargetParsing:
     """Validate XInput buttons and triggers resolution."""
@@ -361,6 +371,36 @@ class TestProfileSecurityAndValidation:
         bad_utf8.write_bytes(b"\xff\xfe\x00\x00 invalid binary data")
         with pytest.raises(ValueError, match="is not valid UTF-8"):
             ProfileManager.load_profile(bad_utf8)
+
+    def test_profile_manager_reload_mixed_valid_and_invalid(self, tmp_path: Path) -> None:
+        valid_file = tmp_path / "valid.json"
+        valid_data = {
+            "name": "ValidProfile",
+            "stick_config": {
+                "sensitivity": 0.05,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+                "invert_y": False,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {},
+        }
+        valid_file.write_text(json.dumps(valid_data), encoding="utf-8")
+
+        # Corrupt file
+        bad_file = tmp_path / "corrupt.json"
+        bad_file.write_text("{invalid json", encoding="utf-8")
+
+        mgr = ProfileManager(profiles_dir=tmp_path)
+        assert len(mgr.profiles) == 1
+        assert mgr.profiles[0].name == "ValidProfile"
+
+    def test_profile_manager_reload_normalized_default(self) -> None:
+        profiles_dir = Path(__file__).parents[1] / "profiles"
+        mgr = ProfileManager(profiles_dir=profiles_dir, default_name="rts")
+        assert mgr.current_profile.name == "RTS / Menu"
 
 
 class TestWASDNormalization:
