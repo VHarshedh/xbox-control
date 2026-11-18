@@ -230,6 +230,9 @@ _user32.GetMonitorInfoW.restype = wt.BOOL
 _user32.ClipCursor.argtypes = [ctypes.c_void_p]
 _user32.ClipCursor.restype = wt.BOOL
 
+_user32.GetForegroundWindow.argtypes = []
+_user32.GetForegroundWindow.restype = wt.HWND
+
 
 def _get_screen_center(current_pt: tuple[int, int] | None = None) -> tuple[int, int, wt.RECT | None]:
     """Calculate center coordinates for the screen or active monitor containing current_pt."""
@@ -375,6 +378,7 @@ class InputHooks:
         self._xbutton1: bool = False
         self._xbutton2: bool = False
         self._wheel_delta: int = 0
+        self._target_hwnd: int = 0
 
         # Hook handles (pointer-sized)
         self._kb_hook: int = 0
@@ -513,6 +517,7 @@ class InputHooks:
     def _deactivate_locked(self) -> None:
         """Reset capture state and release cursor clipping under self._lock."""
         self._active = False
+        self._target_hwnd = 0
         self._center_pt = None
         self._last_pt = None
         self._keys_down.clear()
@@ -526,6 +531,33 @@ class InputHooks:
         self._wheel_delta = 0
         with contextlib.suppress(Exception):
             _user32.ClipCursor(None)
+
+    def deactivate(self) -> None:
+        """Deactivate capture thread-safely and notify callback."""
+        with self._lock:
+            if not self._active:
+                return
+            self._deactivate_locked()
+        if self._on_toggle is not None:
+            with contextlib.suppress(Exception):
+                self._on_toggle(False)
+
+    def check_foreground_window(self) -> bool:
+        """Check if target window still has focus; auto-deactivate if lost."""
+        with self._lock:
+            if not self._active or self._target_hwnd == 0:
+                return True
+            target = self._target_hwnd
+
+        try:
+            cur_hwnd = int(_user32.GetForegroundWindow() or 0)
+        except Exception:
+            return True
+
+        if cur_hwnd != target:
+            self.deactivate()
+            return False
+        return True
 
     def stop(self) -> None:
         """Deactivate, unhook, stop the pump, and join the thread."""
@@ -665,6 +697,17 @@ class InputHooks:
                             new_active = not self._active
 
                             if new_active:
+                                self._active = True
+                                self._target_hwnd = int(_user32.GetForegroundWindow() or 0)
+                                self._dx = self._dy = 0
+                                self._lbutton = False
+                                self._rbutton = False
+                                self._mbutton = False
+                                self._xbutton1 = False
+                                self._xbutton2 = False
+                                self._wheel_delta = 0
+                                self._keys_down.clear()
+
                                 # Determine screen and virtual monitor bounds
                                 vx = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
                                 vy = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
@@ -705,15 +748,6 @@ class InputHooks:
 
                                 self._center_pt = actual_pt
                                 self._last_pt = actual_pt
-                                self._dx = self._dy = 0
-                                self._lbutton = False
-                                self._rbutton = False
-                                self._mbutton = False
-                                self._xbutton1 = False
-                                self._xbutton2 = False
-                                self._wheel_delta = 0
-                                self._keys_down.clear()
-                                self._active = True
                             else:
                                 self._deactivate_locked()
 
@@ -748,11 +782,7 @@ class InputHooks:
 
             # ── Auto-Deactivate on Window Switch (Alt+Tab / Win key) ──
             if self._active and (vk in (VK_LWIN, VK_RWIN) or (bool(kbd.flags & LLKHF_ALTDOWN) and vk == VK_TAB)):
-                with self._lock:
-                    self._deactivate_locked()
-                if self._on_toggle is not None:
-                    with contextlib.suppress(Exception):
-                        self._on_toggle(False)
+                self.deactivate()
                 return int(_user32.CallNextHookEx(
                     self._kb_hook, nCode, wParam, lParam,
                 ))

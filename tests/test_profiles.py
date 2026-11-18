@@ -546,3 +546,143 @@ class TestWheelMappingAndGuideButtons:
         rts = ProfileManager.load_profile(profiles_dir / "rts_menu.json")
         assert 0x24 in rts._key_targets  # VK_HOME
         assert rts._key_targets[0x24] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE]
+
+    def test_subframe_tap_loss_min_button_hold_ticks(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "tap_profile.json"
+        data = {
+            "name": "Tap Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "MOUSE_LEFT": "XUSB_GAMEPAD_A",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        mock_gamepad = MagicMock()
+
+        # Tick 1: Physical click (1-tick tap)
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=True,
+            rbutton=False,
+            mbutton=False,
+        )
+        assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_A] == 6
+        mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+
+        # Inactive ticks where hold counter decays from 6 to 0 (kept active)
+        for expected_counter in range(5, -1, -1):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=False,
+                rbutton=False,
+                mbutton=False,
+            )
+            mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+            if expected_counter > 0:
+                assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_A] == expected_counter
+            else:
+                assert vg.XUSB_BUTTON.XUSB_GAMEPAD_A not in prof._hold_counters
+
+        # Following tick: hold expired, button is released
+        mock_gamepad.reset_mock()
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+        )
+        mock_gamepad.release_button.assert_any_call(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+
+    def test_rapid_multi_notch_scroll_queue_with_release_gaps(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "wheel_queue_profile.json"
+        data = {
+            "name": "Wheel Queue Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "WHEEL_UP": "XUSB_GAMEPAD_Y",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        mock_gamepad = MagicMock()
+
+        # Tick 1: 2 notches in single event (wheel_delta = +240)
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+            wheel_delta=240,
+        )
+        assert prof._wheel_up_ticks == 7
+        assert prof._wheel_up_queue == 1
+        mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)
+
+        # Remaining 7 ticks of first notch hold
+        for _ in range(7):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=False,
+                rbutton=False,
+                mbutton=False,
+                wheel_delta=0,
+            )
+            mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)
+
+        assert prof._wheel_up_ticks == 0
+        assert prof._wheel_up_gap == 6
+        assert prof._wheel_up_queue == 1
+
+        # Release gap of 6 ticks (button released to avoid WebRTC coalescing)
+        for expected_gap in range(5, -1, -1):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=False,
+                rbutton=False,
+                mbutton=False,
+                wheel_delta=0,
+            )
+            mock_gamepad.release_button.assert_any_call(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)
+            if expected_gap > 0:
+                assert prof._wheel_up_gap == expected_gap
+
+        # Second notch now begins
+        assert prof._wheel_up_ticks == 8
+        assert prof._wheel_up_queue == 0
+
+        # Tick of second notch pulse
+        mock_gamepad.reset_mock()
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+            wheel_delta=0,
+        )
+        assert prof._wheel_up_ticks == 7
+        mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)

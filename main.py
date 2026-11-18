@@ -323,15 +323,16 @@ class AppLifecycle:
 # ── System Verification ──────────────────────────────────────────────────
 
 
-def verify_system_requirements(ci_mode: bool = False) -> bool:
+def verify_system_requirements(ci_mode: bool = False, check_controller: bool = True) -> bool:
     """Verify Python, architecture, Windows OS, ViGEmBus kernel driver, and controller creation."""
     checks = [
         ("Python version", check_python_version()),
         ("Architecture", check_architecture()),
         ("Windows OS", check_windows_os()),
         ("ViGEmBus service", check_vigembus_service(ci_mode=ci_mode)),
-        ("vgamepad controller", check_vgamepad_controller(ci_mode=ci_mode)),
     ]
+    if check_controller:
+        checks.append(("vgamepad controller", check_vgamepad_controller(ci_mode=ci_mode)))
 
     for label, (ok, detail) in checks:
         if not ok:
@@ -410,7 +411,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
     print("=" * 60)
 
     # 1. Subsystem and Driver Validation
-    if not verify_system_requirements(ci_mode=ci_mode):
+    if not verify_system_requirements(ci_mode=ci_mode, check_controller=False):
         print("\nInitialization failed. Resolve the driver/system issue above.", file=sys.stderr)
         return 1
 
@@ -513,6 +514,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
         last_tick_error_log = 0.0
         last_controller_state: tuple[int, int, int, int, int, int, int] | None = None
         ticks_since_update = 0
+        active_ticks = 0
 
         try:
             while not lifecycle.shutdown_event.is_set():
@@ -543,8 +545,12 @@ def run_mapper(argv: list[str] | None = None) -> int:
                         if active:
                             timer.reset()
                             profile_mgr.current_profile.mapper.reset()
+                            with contextlib.suppress(Exception):
+                                gamepad.right_joystick(x_value=1, y_value=0)
+                                gamepad.update()
                             last_controller_state = None
                             ticks_since_update = 0
+                            active_ticks = 0
                             print(f"[ON] Profile: {profile_mgr.current_profile.name}", flush=True)
                             logger.debug("Capture activated.")
                         else:
@@ -553,6 +559,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
                             gamepad.update()
                             last_controller_state = None
                             ticks_since_update = 0
+                            active_ticks = 0
                             print("[OFF] Mouse/KB Released", flush=True)
                             logger.debug("Capture deactivated.")
                     except Exception as trans_exc:
@@ -567,6 +574,10 @@ def run_mapper(argv: list[str] | None = None) -> int:
                 # ── Active 250 Hz tick (4 ms budget) ──
                 try:
                     dt = timer.wait()
+                    active_ticks += 1
+                    if active_ticks % 25 == 0 and not hooks.check_foreground_window():
+                        continue
+
                     prof = profile_mgr.current_profile
 
                     # A. Right Stick: accumulate mouse deltas and apply curve
@@ -620,6 +631,19 @@ def run_mapper(argv: list[str] | None = None) -> int:
                     consecutive_tick_errors += 1
                     last_controller_state = None
                     ticks_since_update = 0
+
+                    # Issue 2: ViGEmBus Hot-Reconnect on Sleep/Wake
+                    if consecutive_tick_errors == 10:
+                        try:
+                            logger.info("Attempting ViGEmBus controller hot-reconnect at 10 consecutive tick errors.")
+                            with contextlib.suppress(Exception):
+                                del gamepad
+                            gamepad = vg.VX360Gamepad()
+                            lifecycle.gamepad = gamepad
+                            last_controller_state = None
+                        except Exception as reconnect_exc:
+                            logger.warning("Hot-reconnect attempt failed: %s", reconnect_exc)
+
                     # Failsafe: reset controller immediately to prevent stuck inputs
                     with contextlib.suppress(Exception):
                         gamepad.reset()

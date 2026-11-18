@@ -692,3 +692,45 @@ class TestWindowSwitchAndPreCaptureKeys:
         assert hooks._mbutton is False
         assert hooks._xbutton1 is False
         assert hooks._xbutton2 is False
+
+    def test_foreground_window_check_and_deactivate(self) -> None:
+        toggled: list[bool] = []
+
+        def _on_toggle(st: bool) -> None:
+            toggled.append(st)
+
+        hooks = InputHooks(on_toggle=_on_toggle)
+
+        # Inactive or target_hwnd == 0 always returns True
+        assert hooks.check_foreground_window() is True
+
+        hooks._active = True
+        hooks._target_hwnd = 0x1234
+
+        # Foreground matches target -> returns True, remains active
+        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x1234):
+            assert hooks.check_foreground_window() is True
+            assert hooks.active is True
+            assert len(toggled) == 0
+
+        # Foreground changed to 0x5678 -> returns False, auto-deactivates, fires on_toggle(False)
+        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x5678):
+            assert hooks.check_foreground_window() is False
+            assert hooks.active is False
+            assert hooks._target_hwnd == 0
+            assert toggled == [False]
+
+    def test_f8_activation_records_target_hwnd(self) -> None:
+        hooks = InputHooks()
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = input_hooks.VK_F8
+        kbd.flags = 0
+
+        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0xABCD), patch.object(
+            input_hooks._user32, "SetCursorPos"
+        ), patch.object(input_hooks._user32, "ClipCursor"), patch.object(
+            input_hooks._user32, "CallNextHookEx", return_value=0
+        ):
+            hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+            assert hooks.active is True
+            assert hooks._target_hwnd == 0xABCD

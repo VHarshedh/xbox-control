@@ -375,3 +375,88 @@ class TestMainLoopExceptionResilience:
 
             ret = run_mapper([])
             assert ret == 1
+
+    def test_verify_system_requirements_check_controller_flag(self) -> None:
+        with patch("main.check_python_version", return_value=(True, "")), patch(
+            "main.check_architecture", return_value=(True, "")
+        ), patch("main.check_windows_os", return_value=(True, "")), patch(
+            "main.check_vigembus_service", return_value=(True, "")
+        ), patch("main.check_vgamepad_controller") as mock_check_ctrl:
+            # check_controller=False should skip check_vgamepad_controller
+            ok = main.verify_system_requirements(ci_mode=True, check_controller=False)
+            assert ok is True
+            mock_check_ctrl.assert_not_called()
+
+            # check_controller=True calls check_vgamepad_controller
+            mock_check_ctrl.return_value = (True, "")
+            ok2 = main.verify_system_requirements(ci_mode=True, check_controller=True)
+            assert ok2 is True
+            mock_check_ctrl.assert_called_once_with(ci_mode=True)
+
+    def test_run_mapper_skips_controller_check_on_startup(self) -> None:
+        with patch("main.verify_system_requirements", return_value=True) as mock_verify, patch(
+            "vgamepad.VX360Gamepad"
+        ), patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer"):
+            instance = mock_hooks.return_value
+            instance.active = False
+            instance.consume_profile_cycle.return_value = False
+            instance.is_healthy = True
+
+            with patch("time.sleep", side_effect=KeyboardInterrupt):
+                run_mapper([])
+
+            # Verify that verify_system_requirements was called with check_controller=False
+            mock_verify.assert_called_once_with(ci_mode=mock_verify.call_args.kwargs.get("ci_mode"), check_controller=False)
+
+    def test_wakeup_pulse_on_f8_activation(self) -> None:
+        with patch("main.verify_system_requirements", return_value=True), patch(
+            "vgamepad.VX360Gamepad"
+        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer"):
+            pad_instance = mock_pad_cls.return_value
+            instance = mock_hooks.return_value
+            instance.consume_profile_cycle.return_value = False
+            instance.is_healthy = True
+
+            # Sequence: inactive -> active (trigger wakeup) -> stop
+            states = [False, True]
+
+            def fake_active() -> bool:
+                if states:
+                    return states.pop(0)
+                raise KeyboardInterrupt
+
+            type(instance).active = property(lambda self: fake_active())  # type: ignore[assignment]
+
+            with patch("time.sleep"):
+                run_mapper([])
+
+            # Verify 1-tick micro-axis wakeup report was sent
+            pad_instance.right_joystick.assert_any_call(x_value=1, y_value=0)
+
+    def test_hot_reconnect_at_ten_consecutive_tick_errors(self) -> None:
+        with patch("main.verify_system_requirements", return_value=True), patch(
+            "vgamepad.VX360Gamepad"
+        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer") as mock_timer:
+            mock_hooks_inst = mock_hooks.return_value
+            mock_hooks_inst.active = True
+            mock_hooks_inst.is_healthy = True
+            mock_hooks_inst.consume_profile_cycle.return_value = False
+            mock_hooks_inst.check_foreground_window.return_value = True
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 10:
+                    raise KeyboardInterrupt
+                raise RuntimeError("Kernel IOCTL dropped during sleep")
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                run_mapper([])
+
+            # Initial allocation + 1 hot-reconnect at error 10 = 2 allocations
+            assert mock_pad_cls.call_count == 2

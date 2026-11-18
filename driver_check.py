@@ -86,14 +86,24 @@ def elevate_and_run(extra_args: list[str] | None = None) -> bool:
         return True
     try:
         shell32 = ctypes.windll.shell32  # type: ignore[attr-defined]
+        shell32.ShellExecuteW.argtypes = [
+            wt.HWND,
+            wt.LPCWSTR,
+            wt.LPCWSTR,
+            wt.LPCWSTR,
+            wt.LPCWSTR,
+            ctypes.c_int,
+        ]
+        shell32.ShellExecuteW.restype = ctypes.c_void_p
         args_list = [sys.executable, str(Path(__file__).resolve())]
         if extra_args:
             args_list.extend(extra_args)
         params = " ".join(f'"{a}"' if " " in a else a for a in args_list[1:])
         # SW_SHOWNORMAL = 1
         ret = shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
-        # ShellExecute returns > 32 on success
-        return int(ret) > 32
+        # ShellExecute returns > 32 on success (casted through pointer size on 64-bit)
+        ret_val = int(ret or 0)
+        return ret_val > 32
     except Exception as exc:
         logger.error("Failed to request UAC elevation: %s", exc)
         return False

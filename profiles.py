@@ -177,6 +177,10 @@ _UNSUPPORTED_CONTROLLER_TOKENS: frozenset[str] = frozenset({
 
 INV_SQRT2: float = 1.0 / math.sqrt(2.0)
 
+MIN_BUTTON_HOLD_TICKS: int = 6
+_WHEEL_HOLD_TICKS: int = 8
+_WHEEL_GAP_TICKS: int = 6
+
 
 def _reject_non_finite(val: str) -> None:
     """Reject non-finite JSON constants (NaN, Infinity, -Infinity) for security."""
@@ -420,6 +424,11 @@ class Profile:
         "_uses_rt",
         "_wheel_up_ticks",
         "_wheel_down_ticks",
+        "_wheel_up_queue",
+        "_wheel_up_gap",
+        "_wheel_down_queue",
+        "_wheel_down_gap",
+        "_hold_counters",
     )
 
     def __init__(
@@ -452,6 +461,11 @@ class Profile:
         self._uses_rt: bool = False
         self._wheel_up_ticks: int = 0
         self._wheel_down_ticks: int = 0
+        self._wheel_up_queue: int = 0
+        self._wheel_up_gap: int = 0
+        self._wheel_down_queue: int = 0
+        self._wheel_down_gap: int = 0
+        self._hold_counters: dict[str | vg.XUSB_BUTTON, int] = {}
 
         self._parse_buttons(raw_buttons)
 
@@ -555,61 +569,86 @@ class Profile:
         rt_active = False
         keys = keys_pressed if keys_pressed is not None else frozenset()
 
-        # Update wheel pulse counters
+        # Update wheel queue and ticks
         if wheel_delta > 0:
-            self._wheel_up_ticks = 8
+            notches = max(1, abs(wheel_delta) // 120)
+            if self._wheel_up_ticks == 0 and self._wheel_up_gap == 0:
+                self._wheel_up_ticks = _WHEEL_HOLD_TICKS
+                self._wheel_up_queue = min(5, self._wheel_up_queue + (notches - 1))
+            else:
+                self._wheel_up_queue = min(5, self._wheel_up_queue + notches)
         elif wheel_delta < 0:
-            self._wheel_down_ticks = 8
+            notches = max(1, abs(wheel_delta) // 120)
+            if self._wheel_down_ticks == 0 and self._wheel_down_gap == 0:
+                self._wheel_down_ticks = _WHEEL_HOLD_TICKS
+                self._wheel_down_queue = min(5, self._wheel_down_queue + (notches - 1))
+            else:
+                self._wheel_down_queue = min(5, self._wheel_down_queue + notches)
 
-        # ── Mouse button actions ──
-        if lbutton:
-            for tgt in self._mouse_targets["left"]:
-                if tgt == "RT":
-                    rt_active = True
-                elif tgt == "LT":
-                    lt_active = True
-                else:
-                    active_buttons.add(tgt)
-
-        if rbutton:
-            for tgt in self._mouse_targets["right"]:
-                if tgt == "RT":
-                    rt_active = True
-                elif tgt == "LT":
-                    lt_active = True
-                else:
-                    active_buttons.add(tgt)
-
-        if mbutton:
-            for tgt in self._mouse_targets["middle"]:
-                if tgt == "RT":
-                    rt_active = True
-                elif tgt == "LT":
-                    lt_active = True
-                else:
-                    active_buttons.add(tgt)
-
-        if xbutton1:
-            for tgt in self._mouse_targets["x1"]:
-                if tgt == "RT":
-                    rt_active = True
-                elif tgt == "LT":
-                    lt_active = True
-                else:
-                    active_buttons.add(tgt)
-
-        if xbutton2:
-            for tgt in self._mouse_targets["x2"]:
-                if tgt == "RT":
-                    rt_active = True
-                elif tgt == "LT":
-                    lt_active = True
-                else:
-                    active_buttons.add(tgt)
-
-        # ── Wheel pulse actions ──
+        wheel_up_active = False
         if self._wheel_up_ticks > 0:
+            wheel_up_active = True
             self._wheel_up_ticks -= 1
+            if self._wheel_up_ticks == 0 and self._wheel_up_queue > 0:
+                self._wheel_up_gap = _WHEEL_GAP_TICKS
+        elif self._wheel_up_gap > 0:
+            self._wheel_up_gap -= 1
+            if self._wheel_up_gap == 0 and self._wheel_up_queue > 0:
+                self._wheel_up_queue -= 1
+                self._wheel_up_ticks = _WHEEL_HOLD_TICKS
+
+        wheel_down_active = False
+        if self._wheel_down_ticks > 0:
+            wheel_down_active = True
+            self._wheel_down_ticks -= 1
+            if self._wheel_down_ticks == 0 and self._wheel_down_queue > 0:
+                self._wheel_down_gap = _WHEEL_GAP_TICKS
+        elif self._wheel_down_gap > 0:
+            self._wheel_down_gap -= 1
+            if self._wheel_down_gap == 0 and self._wheel_down_queue > 0:
+                self._wheel_down_queue -= 1
+                self._wheel_down_ticks = _WHEEL_HOLD_TICKS
+
+        # ── Physical inputs ──
+        physical_targets: set[str | vg.XUSB_BUTTON] = set()
+        if lbutton:
+            physical_targets.update(self._mouse_targets["left"])
+        if rbutton:
+            physical_targets.update(self._mouse_targets["right"])
+        if mbutton:
+            physical_targets.update(self._mouse_targets["middle"])
+        if xbutton1:
+            physical_targets.update(self._mouse_targets["x1"])
+        if xbutton2:
+            physical_targets.update(self._mouse_targets["x2"])
+
+        for vk, targets in self._key_targets.items():
+            if vk in keys:
+                physical_targets.update(targets)
+
+        # ── Sub-frame hold counters ──
+        active_physical_or_held: set[str | vg.XUSB_BUTTON] = set(physical_targets)
+        for tgt in physical_targets:
+            self._hold_counters[tgt] = MIN_BUTTON_HOLD_TICKS
+
+        for tgt in list(self._hold_counters):
+            if tgt not in physical_targets:
+                if self._hold_counters[tgt] > 0:
+                    self._hold_counters[tgt] -= 1
+                    active_physical_or_held.add(tgt)
+                if self._hold_counters[tgt] == 0:
+                    del self._hold_counters[tgt]
+
+        for tgt in active_physical_or_held:
+            if tgt == "RT":
+                rt_active = True
+            elif tgt == "LT":
+                lt_active = True
+            else:
+                active_buttons.add(tgt)
+
+        # ── Wheel pulse actions (independent of hold counters to maintain release gap) ──
+        if wheel_up_active:
             for tgt in self._mouse_targets["wheel_up"]:
                 if tgt == "RT":
                     rt_active = True
@@ -618,8 +657,7 @@ class Profile:
                 else:
                     active_buttons.add(tgt)
 
-        if self._wheel_down_ticks > 0:
-            self._wheel_down_ticks -= 1
+        if wheel_down_active:
             for tgt in self._mouse_targets["wheel_down"]:
                 if tgt == "RT":
                     rt_active = True
@@ -627,17 +665,6 @@ class Profile:
                     lt_active = True
                 else:
                     active_buttons.add(tgt)
-
-        # ── Keyboard actions ──
-        for vk, targets in self._key_targets.items():
-            if vk in keys:
-                for tgt in targets:
-                    if tgt == "RT":
-                        rt_active = True
-                    elif tgt == "LT":
-                        lt_active = True
-                    else:
-                        active_buttons.add(tgt)
 
         # ── Commit triggers ──
         if self._uses_lt:
@@ -665,6 +692,11 @@ class Profile:
         gamepad.right_trigger(value=0)
         self._wheel_up_ticks = 0
         self._wheel_down_ticks = 0
+        self._wheel_up_queue = 0
+        self._wheel_up_gap = 0
+        self._wheel_down_queue = 0
+        self._wheel_down_gap = 0
+        self._hold_counters.clear()
         self.mapper.reset()
 
 
