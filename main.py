@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import vgamepad_compat  # noqa: F401  # isort: skip
 import vgamepad as vg
 
 from driver_check import (

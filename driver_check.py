@@ -463,8 +463,9 @@ def restart_vigembus_service(timeout: float = 15.0) -> tuple[bool, str]:
 def check_vgamepad_controller(ci_mode: bool = False) -> tuple[bool, str]:
     """Attempt to create, reset, and release a virtual Xbox 360 controller."""
     try:
+        import vgamepad_compat  # noqa: F401  # isort: skip
         import vgamepad  # noqa: WPS433 — late import is intentional
-    except ImportError:
+    except (ImportError, Exception):
         return False, ("The 'vgamepad' package is not installed.\n  → pip install vgamepad")
 
     gamepad: vgamepad.VX360Gamepad | None = None

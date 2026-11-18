@@ -7,6 +7,8 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+import vgamepad_compat  # noqa: F401  # isort: skip
 import vgamepad as vg
 
 import main
