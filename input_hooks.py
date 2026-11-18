@@ -1063,18 +1063,27 @@ class InputHooks:
 
             # ── Momentary UI Clutch Hotkey (~ / Backtick) ──
             if vk == VK_OEM_3:
-                if not is_injected:
+                if not is_injected and self._active:
                     if wParam in _KEY_DOWN_MSGS and not self._clutch_held:
                         self._clutch_held = True
                         with self._lock:
                             self._clutch_active = True
+                            self._keys_down.clear()
+                            self._lbutton = False
+                            self._rbutton = False
+                            self._mbutton = False
+                            self._xbutton1 = False
+                            self._xbutton2 = False
+                            self._dx = 0
+                            self._dy = 0
+                            self._wheel_delta = 0
                         with contextlib.suppress(Exception):
                             _user32.ClipCursor(None)
                     elif wParam in _KEY_UP_MSGS:
                         self._clutch_held = False
                         with self._lock:
                             self._clutch_active = False
-                            if self._active and self._center_pt is not None:
+                            if self._center_pt is not None:
                                 cx, cy = self._center_pt
                                 with contextlib.suppress(Exception):
                                     _user32.SetCursorPos(cx, cy)
@@ -1083,18 +1092,9 @@ class InputHooks:
                                     with contextlib.suppress(Exception):
                                         _user32.ClipCursor(ctypes.byref(self._monitor_rc))
 
-                # Pass through the clutch key so Windows/Chrome can process it
-                return int(
-                    _user32.CallNextHookEx(
-                        self._kb_hook,
-                        nCode,
-                        wParam,
-                        lParam,
-                    )
-                )
-
-            # ── Clutch active: pass all keys through to Windows/Chrome ──
-            if self._clutch_active:
+                # When active, swallow VK_OEM_3 so backtick is never typed into browser forms/games
+                if self._active:
+                    return 1
                 return int(
                     _user32.CallNextHookEx(
                         self._kb_hook,
@@ -1109,6 +1109,17 @@ class InputHooks:
                 vk in (VK_LWIN, VK_RWIN) or (bool(kbd.flags & LLKHF_ALTDOWN) and vk == VK_TAB)
             ):
                 self.deactivate()
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
+
+            # ── Clutch active: pass all keys through to Windows/Chrome ──
+            if self._clutch_active:
                 return int(
                     _user32.CallNextHookEx(
                         self._kb_hook,

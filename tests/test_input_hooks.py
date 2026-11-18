@@ -1171,6 +1171,17 @@ class TestWindowSwitchAndPreCaptureKeys:
         hooks._center_pt = (960, 540)
         hooks._last_pt = (960, 540)
 
+        # Pre-seed held inputs to verify they get cleared when clutch is engaged
+        hooks._keys_down.add(65)
+        hooks._lbutton = True
+        hooks._rbutton = True
+        hooks._mbutton = True
+        hooks._xbutton1 = True
+        hooks._xbutton2 = True
+        hooks._dx = 15
+        hooks._dy = -20
+        hooks._wheel_delta = 120
+
         kbd_down = KBDLLHOOKSTRUCT()
         kbd_down.vkCode = VK_OEM_3
         kbd_down.flags = 0
@@ -1180,11 +1191,20 @@ class TestWindowSwitchAndPreCaptureKeys:
             patch.object(input_hooks._user32, "ClipCursor") as mock_clip,
             patch.object(input_hooks._user32, "SetCursorPos") as mock_set_cursor,
         ):
-            # 1. Keydown on ~: activates clutch, unclips cursor
+            # 1. Keydown on ~: swallowed (return 1), activates clutch, unclips cursor, clears held inputs
             res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd_down))
-            assert res == 42
+            assert res == 1
             assert hooks.clutch_active is True
             mock_clip.assert_called_with(None)
+            assert len(hooks._keys_down) == 0
+            assert hooks._lbutton is False
+            assert hooks._rbutton is False
+            assert hooks._mbutton is False
+            assert hooks._xbutton1 is False
+            assert hooks._xbutton2 is False
+            assert hooks._dx == 0
+            assert hooks._dy == 0
+            assert hooks._wheel_delta == 0
 
             # 2. While clutch is active, mouse move passes through to Windows/Chrome
             ms = MSLLHOOKSTRUCT()
@@ -1194,11 +1214,51 @@ class TestWindowSwitchAndPreCaptureKeys:
             res_m = hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
             assert res_m == 42
 
-            # 3. Keyup on ~: deactivates clutch, recenters cursor to (960, 540)
+            # 3. Keyup on ~: swallowed (return 1), deactivates clutch, recenters cursor to (960, 540)
             kbd_up = KBDLLHOOKSTRUCT()
             kbd_up.vkCode = VK_OEM_3
             kbd_up.flags = 0
             res_up = hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd_up))
-            assert res_up == 42
+            assert res_up == 1
             assert hooks.clutch_active is False
             mock_set_cursor.assert_called_with(960, 540)
+
+            # 4. When inactive, VK_OEM_3 passes through to CallNextHookEx (42) and clutch does not engage
+            hooks._active = False
+            res_inact = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd_down))
+            assert res_inact == 42
+            assert hooks.clutch_active is False
+            res_inact_up = hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd_up))
+            assert res_inact_up == 42
+            assert hooks.clutch_active is False
+
+    def test_alt_tab_while_clutch_active_deactivates_capture(self) -> None:
+        """Pressing Alt+Tab while momentary clutch is held cleanly deactivates capture."""
+        toggled_states: list[bool] = []
+        hooks = InputHooks(on_toggle=lambda st: toggled_states.append(st))
+        hooks._active = True
+        hooks._center_pt = (960, 540)
+        hooks._last_pt = (960, 540)
+
+        kbd_clutch = KBDLLHOOKSTRUCT()
+        kbd_clutch.vkCode = VK_OEM_3
+        kbd_clutch.flags = 0
+
+        with (
+            patch.object(input_hooks._user32, "CallNextHookEx", return_value=42),
+            patch.object(input_hooks._user32, "ClipCursor"),
+        ):
+            # Engage clutch
+            hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd_clutch))
+            assert hooks.clutch_active is True
+
+            # Alt+Tab arrives
+            kbd_alt_tab = KBDLLHOOKSTRUCT()
+            kbd_alt_tab.vkCode = input_hooks.VK_TAB
+            kbd_alt_tab.flags = input_hooks.LLKHF_ALTDOWN
+
+            res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd_alt_tab))
+            assert res == 42
+            assert hooks.active is False
+            assert hooks.clutch_active is False
+            assert toggled_states == [False]

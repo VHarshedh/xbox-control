@@ -450,7 +450,7 @@ class TestMainLoopExceptionResilience:
     def test_wakeup_pulse_on_f8_activation(self) -> None:
         """Verify 40ms 10-tick Chromium wakeup pulse on F8 activation and immediate cancellation on mouse move."""
         # 1. On F8 activation with dx=0, dy=0:
-        # right_joystick(x_value=12000, y_value=0) sent for WAKEUP_PULSE_TICKS (10 ticks)
+        # right_joystick(x_value=1, y_value=0) sent for WAKEUP_PULSE_TICKS (10 ticks)
         # then returns to (0, 0) on the 11th tick.
         with (
             patch("main.verify_system_requirements", return_value=True),
@@ -1318,7 +1318,7 @@ class TestMouseStickRouting:
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
             hooks_inst.check_foreground_window.return_value = True
-            hooks_inst.consume_mouse_delta.return_value = (0, 0)
+            hooks_inst.consume_mouse_delta.return_value = (40, -20)
             # W key (87) + Left Alt walk key (0xA4)
             hooks_inst.get_keys_pressed.return_value = {87, 0xA4}
             hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
@@ -1443,13 +1443,17 @@ class TestMouseStickRouting:
                 ret = run_mapper([])
                 assert ret == 0
 
-            # Verify LEFT_THUMB pressed during the 10 wakeup ticks
+            # Verify LEFT_THUMB pressed during the 10 wakeup ticks, and Button A is NOT pressed
             press_calls = [
                 c
                 for c in pad_instance.press_button.call_args_list
                 if c == ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB})
             ]
             assert len(press_calls) == WAKEUP_PULSE_TICKS
+            assert (
+                (),
+                {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_A},
+            ) not in pad_instance.press_button.call_args_list
 
             # Verify LEFT_THUMB released when wakeup ticks transition to 0 (tick 11)
             release_calls = [
@@ -1933,16 +1937,15 @@ class TestMouseStickRouting:
             # When mouse is stationary, Left Stick receives WASD (W = Up) for menu navigation
             lj_calls = pad_instance.left_joystick.call_args_list
             assert len(lj_calls) >= 1
-            assert lj_calls[0][1]["y_value"] == 32767
-            assert lj_calls[0][1]["x_value"] == 0
+            assert lj_calls[0] == ((), {"x_value": 0, "y_value": 32767})
 
-            # Right Stick also receives WASD for map panning
+            # Right Stick remains neutral (0, 0)
             rj_calls = pad_instance.right_joystick.call_args_list
             assert len(rj_calls) >= 1
-            assert rj_calls[0][1]["y_value"] == 32767
+            assert rj_calls[0] == ((), {"x_value": 0, "y_value": 0})
 
     def test_browser_focus_triggers_auto_wakeup_pulse(self) -> None:
-        """Switching focus to Chrome/Edge immediately pulses L3 + A without waiting for idle timer."""
+        """Switching focus to Chrome/Edge immediately pulses L3 silently without waiting for idle timer."""
 
         def fake_pid(h: Any, ptr: Any) -> int:
             ptr._obj.value = 1234
@@ -1978,7 +1981,58 @@ class TestMouseStickRouting:
                 ret = run_mapper(["--profile", "Shooter"])
                 assert ret == 0
 
-            # Both Left Thumb and A button must have been pressed
+            # Left Thumb must have been pressed, but A button must NOT be pressed
             press_calls = pad_instance.press_button.call_args_list
             assert ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB}) in press_calls
-            assert ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_A}) in press_calls
+            assert ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_A}) not in press_calls
+
+    def test_momentary_clutch_pauses_gamepad_writes_and_resets_controls(self) -> None:
+        """When hooks.clutch_active is True, virtual controller resets controls once and skips writes."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            _ = mock_timer
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.consume_stick_swap.return_value = False
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (50, 50)
+            hooks_inst.get_keys_pressed.return_value = {87}
+            hooks_inst.get_mouse_buttons.return_value = (True, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            # Tick 1: normal active write
+            # Tick 2, 3: clutch active -> resets controls once, skips stick/button writes
+            # Tick 4: clutch released -> normal write resumes
+            clutch_states = [False, True, True, False]
+            type(hooks_inst).clutch_active = property(
+                lambda self: clutch_states.pop(0) if clutch_states else False
+            )
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 4:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "Shooter"])
+                assert ret == 0
+
+            # Verify pad_instance.reset() was called: 1 init + 1 entering clutch + 1 shutdown cleanup = 3
+            assert pad_instance.reset.call_count == 3
+            # Verify stick writes occurred on ticks 1 and 4, but were skipped during clutch ticks 2 and 3
+            assert len(pad_instance.right_joystick.call_args_list) == 2
+            assert len(pad_instance.left_joystick.call_args_list) == 2

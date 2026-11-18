@@ -67,7 +67,7 @@ _RESERVED_DEVICE_NAMES: frozenset[str] = frozenset(
 MAX_CONSECUTIVE_TICK_ERRORS: int = 50
 TICK_ERROR_LOG_INTERVAL_SEC: float = 1.0
 WAKEUP_PULSE_TICKS: int = 10
-WAKEUP_STICK_VALUE: int = 12000
+WAKEUP_STICK_VALUE: int = 1
 IDLE_WAKE_INTERVAL_SEC: float = 2.0
 
 
@@ -569,6 +569,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
         stick_swap_override: bool = False
         last_idle_wake_time: float = time.monotonic()
         prev_fg_exe: str = ""
+        clutch_engaged: bool = False
 
         try:
             while not lifecycle.shutdown_event.is_set():
@@ -672,6 +673,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
                             last_controller_state = None
                             ticks_since_update = 0
                             active_ticks = 0
+                            clutch_engaged = False
                             last_idle_wake_time = time.monotonic()
                             print("[OFF] Mouse/KB Released", flush=True)
                             logger.debug("Capture deactivated.")
@@ -710,12 +712,12 @@ def run_mapper(argv: list[str] | None = None) -> int:
                     if should_wake:
                         try:
                             gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
-                            if wake_requested or browser_just_gained_focus:
+                            if wake_requested:
                                 gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
                             gamepad.update()
                             time.sleep(0.040)
                             gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
-                            if wake_requested or browser_just_gained_focus:
+                            if wake_requested:
                                 gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
                             gamepad.update()
                             last_idle_wake_time = now
@@ -727,7 +729,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
                                 logger.debug("Explicit F7 controller wakeup pulse sent.")
                             elif browser_just_gained_focus:
                                 print(
-                                    f"[BROWSER] Focus on {cur_fg_exe} detected — auto-pulsed controller wakeup (A + L3)",
+                                    f"[BROWSER] Focus on {cur_fg_exe} detected — auto-pulsed controller wakeup (L3)",
                                     flush=True,
                                 )
                         except Exception as idle_wake_exc:
@@ -738,6 +740,17 @@ def run_mapper(argv: list[str] | None = None) -> int:
                 # ── Active 250 Hz tick (4 ms budget) ──
                 try:
                     dt = timer.wait()
+                    if hooks.clutch_active is True:
+                        if not clutch_engaged:
+                            profile_mgr.current_profile.reset_controls(gamepad)
+                            gamepad.reset()
+                            gamepad.update()
+                            last_controller_state = None
+                            ticks_since_update = 0
+                            clutch_engaged = True
+                        continue
+                    clutch_engaged = False
+
                     active_ticks += 1
                     if active_ticks % 25 == 0 and not hooks.check_foreground_window():
                         continue
@@ -787,8 +800,9 @@ def run_mapper(argv: list[str] | None = None) -> int:
                         # In RTS / Menu mode: when mouse is idle in menus, WASD directly drives Left Stick!
                         # When mouse moves, mouse drives Left Stick, and WASD drives Right Stick for camera panning.
                         if stick_mx == 0 and stick_my == 0:
-                            lx, ly = stick_wx, stick_wy
-                            rx, ry = stick_wx, stick_wy
+                            lx = max(-32768, min(32767, stick_mx + stick_wx))
+                            ly = max(-32768, min(32767, stick_my + stick_wy))
+                            rx, ry = 0, 0
                         else:
                             lx, ly = stick_mx, stick_my
                             rx, ry = stick_wx, stick_wy
@@ -812,10 +826,9 @@ def run_mapper(argv: list[str] | None = None) -> int:
                         wheel_delta=wheel_delta,
                     )
 
-                    # Chromium GamepadProvider button user-gesture wakeup (L3 + A pulse on F8)
+                    # Chromium GamepadProvider button user-gesture wakeup (L3 pulse on F8)
                     if wakeup_pulse_active:
                         gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
-                        gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
                         wakeup_button_held = True
                     elif wakeup_button_held:
                         if not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB):
