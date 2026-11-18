@@ -86,13 +86,23 @@ class TestProfileNameValidation:
             "AUX",
             "NUL",
             "nul",
+            "CONIN$",
+            "conin$",
+            "CONOUT$",
+            "conout$",
+            "COM0",
+            "com0",
             "COM1",
             "com9",
+            "LPT0",
+            "lpt0",
             "LPT1",
             "lpt3",
             "CON.json",
             "nul.json",
             "aux.profile",
+            "con.test.json",
+            "com0.custom.json",
         ]
         for c in reserved_cases:
             ok, reason = validate_profile_name(c)
@@ -460,3 +470,36 @@ class TestMainLoopExceptionResilience:
 
             # Initial allocation + 1 hot-reconnect at error 10 = 2 allocations
             assert mock_pad_cls.call_count == 2
+
+    def test_hot_reconnect_instantiation_failure_resilience(self) -> None:
+        """When VX360Gamepad fails during hot-reconnect, gamepad remains bound and does not raise UnboundLocalError."""
+        with patch("main.verify_system_requirements", return_value=True), patch(
+            "vgamepad.VX360Gamepad"
+        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer") as mock_timer:
+            mock_hooks_inst = mock_hooks.return_value
+            mock_hooks_inst.active = True
+            mock_hooks_inst.is_healthy = True
+            mock_hooks_inst.consume_profile_cycle.return_value = False
+            mock_hooks_inst.check_foreground_window.return_value = True
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            # 1st call succeeds (initialization), 2nd call fails (hot-reconnect)
+            init_pad = MagicMock()
+            mock_pad_cls.side_effect = [init_pad, RuntimeError("Driver communication fault")]
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 12:
+                    raise KeyboardInterrupt
+                raise RuntimeError("Kernel IOCTL dropped during sleep")
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                run_mapper([])
+
+            # Verified loop survived past tick 10 to tick 12 without UnboundLocalError
+            assert tick_count == 13

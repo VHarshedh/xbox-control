@@ -98,9 +98,10 @@ def elevate_and_run(extra_args: list[str] | None = None) -> bool:
         args_list = [sys.executable, str(Path(__file__).resolve())]
         if extra_args:
             args_list.extend(extra_args)
-        params = " ".join(f'"{a}"' if " " in a else a for a in args_list[1:])
+        params = subprocess.list2cmdline(args_list[1:])
+        cur_dir = str(Path(__file__).parent.resolve())
         # SW_SHOWNORMAL = 1
-        ret = shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
+        ret = shell32.ShellExecuteW(None, "runas", sys.executable, params, cur_dir, 1)
         # ShellExecute returns > 32 on success (casted through pointer size on 64-bit)
         ret_val = int(ret or 0)
         return ret_val > 32
@@ -133,16 +134,16 @@ def _load_advapi32() -> ctypes.WinDLL:
     """Load advapi32.dll strictly from System32 using LOAD_LIBRARY_SEARCH_SYSTEM32 (CWE-426/427)."""
     # LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800
     try:
-        return ctypes.WinDLL("advapi32.dll", winmode=0x00000800)
+        return ctypes.WinDLL("advapi32.dll", winmode=0x00000800, use_last_error=True)
     except TypeError:
         sys_dir = _get_system_directory()
-        return ctypes.WinDLL(str(sys_dir / "advapi32.dll"))
+        return ctypes.WinDLL(str(sys_dir / "advapi32.dll"), use_last_error=True)
     except Exception as exc:
         sys_dir = _get_system_directory()
         dll_path = sys_dir / "advapi32.dll"
         if not dll_path.is_file():
             raise FileNotFoundError(f"advapi32.dll not found at secure path: {dll_path}") from exc
-        return ctypes.WinDLL(str(dll_path), winmode=0x00000800)
+        return ctypes.WinDLL(str(dll_path), winmode=0x00000800, use_last_error=True)
 
 
 class SERVICE_STATUS(ctypes.Structure):
@@ -253,7 +254,7 @@ def _check_vigembus_service_internal() -> tuple[bool, str]:
                         "  → Or reboot after installing ViGEmBus v1.17.333+."
                     )
             else:
-                err = ctypes.GetLastError()
+                err = ctypes.get_last_error()
                 # ERROR_SERVICE_DOES_NOT_EXIST = 1060
                 if err == 1060:
                     return False, _vigembus_install_message()
@@ -322,7 +323,7 @@ def start_vigembus_service(timeout: float = 10.0) -> tuple[bool, str]:
             svc = advapi32.OpenServiceW(scm, "ViGEmBus", SERVICE_START | SERVICE_QUERY_STATUS)
             if svc:
                 ok = advapi32.StartServiceW(svc, 0, None)
-                if ok or ctypes.GetLastError() == 1056:  # ERROR_SERVICE_ALREADY_RUNNING
+                if ok or ctypes.get_last_error() == 1056:  # ERROR_SERVICE_ALREADY_RUNNING
                     status = SERVICE_STATUS()
                     deadline = time.monotonic() + timeout
                     while time.monotonic() < deadline:
@@ -402,7 +403,7 @@ def stop_vigembus_service(timeout: float = 10.0) -> tuple[bool, str]:
                         return False, "ViGEmBus service stop timed out while pending."
 
                 ok = advapi32.ControlService(svc, SERVICE_CONTROL_STOP, ctypes.byref(status))
-                if ok or ctypes.GetLastError() == 1062:  # ERROR_SERVICE_NOT_ACTIVE
+                if ok or ctypes.get_last_error() == 1062:  # ERROR_SERVICE_NOT_ACTIVE
                     deadline = time.monotonic() + timeout
                     while time.monotonic() < deadline:
                         if (

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import math
 import os
 import stat
@@ -20,6 +21,8 @@ from typing import Any
 import vgamepad as vg
 
 from stick_mapper import MouseToStickMapper
+
+logger = logging.getLogger("profiles")
 
 # ── Win32 Virtual Key Lookup ─────────────────────────────────────────────
 
@@ -147,8 +150,8 @@ _XUSB_BUTTON_MAP: dict[str, vg.XUSB_BUTTON] = {
 
 _RESERVED_DEVICE_NAMES: frozenset[str] = frozenset(
     {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
-    | {f"COM{i}" for i in range(1, 10)}
-    | {f"LPT{i}" for i in range(1, 10)}
+    | {f"COM{i}" for i in range(0, 10)}
+    | {f"LPT{i}" for i in range(0, 10)}
 )
 
 _UNSUPPORTED_CONTROLLER_TOKENS: frozenset[str] = frozenset({
@@ -429,6 +432,10 @@ class Profile:
         "_wheel_down_queue",
         "_wheel_down_gap",
         "_hold_counters",
+        "_prev_physical_targets",
+        "_active_buttons",
+        "_physical_targets",
+        "_active_physical_or_held",
     )
 
     def __init__(
@@ -466,6 +473,10 @@ class Profile:
         self._wheel_down_queue: int = 0
         self._wheel_down_gap: int = 0
         self._hold_counters: dict[str | vg.XUSB_BUTTON, int] = {}
+        self._prev_physical_targets: set[str | vg.XUSB_BUTTON] = set()
+        self._active_buttons: set[vg.XUSB_BUTTON] = set()
+        self._physical_targets: set[str | vg.XUSB_BUTTON] = set()
+        self._active_physical_or_held: set[str | vg.XUSB_BUTTON] = set()
 
         self._parse_buttons(raw_buttons)
 
@@ -564,7 +575,8 @@ class Profile:
         wheel_delta: int = 0,
     ) -> None:
         """Map held keys, mouse buttons, and scroll wheel to virtual gamepad controls."""
-        active_buttons: set[vg.XUSB_BUTTON] = set()
+        active_buttons: set[vg.XUSB_BUTTON] = self._active_buttons
+        active_buttons.clear()
         lt_active = False
         rt_active = False
         keys = keys_pressed if keys_pressed is not None else frozenset()
@@ -610,7 +622,8 @@ class Profile:
                 self._wheel_down_ticks = _WHEEL_HOLD_TICKS
 
         # ── Physical inputs ──
-        physical_targets: set[str | vg.XUSB_BUTTON] = set()
+        physical_targets: set[str | vg.XUSB_BUTTON] = self._physical_targets
+        physical_targets.clear()
         if lbutton:
             physical_targets.update(self._mouse_targets["left"])
         if rbutton:
@@ -627,17 +640,23 @@ class Profile:
                 physical_targets.update(targets)
 
         # ── Sub-frame hold counters ──
-        active_physical_or_held: set[str | vg.XUSB_BUTTON] = set(physical_targets)
+        # Initialize hold counter only on rising edge (transition from not pressed to pressed)
         for tgt in physical_targets:
-            self._hold_counters[tgt] = MIN_BUTTON_HOLD_TICKS
+            if tgt not in self._prev_physical_targets:
+                self._hold_counters[tgt] = MIN_BUTTON_HOLD_TICKS
 
+        active_physical_or_held: set[str | vg.XUSB_BUTTON] = self._active_physical_or_held
+        active_physical_or_held.clear()
+        active_physical_or_held.update(physical_targets)
         for tgt in list(self._hold_counters):
+            self._hold_counters[tgt] -= 1
             if tgt not in physical_targets:
-                if self._hold_counters[tgt] > 0:
-                    self._hold_counters[tgt] -= 1
-                    active_physical_or_held.add(tgt)
-                if self._hold_counters[tgt] == 0:
-                    del self._hold_counters[tgt]
+                active_physical_or_held.add(tgt)
+            if self._hold_counters[tgt] <= 0:
+                del self._hold_counters[tgt]
+
+        self._prev_physical_targets.clear()
+        self._prev_physical_targets.update(physical_targets)
 
         for tgt in active_physical_or_held:
             if tgt == "RT":
@@ -697,6 +716,10 @@ class Profile:
         self._wheel_down_queue = 0
         self._wheel_down_gap = 0
         self._hold_counters.clear()
+        self._prev_physical_targets.clear()
+        self._active_buttons.clear()
+        self._physical_targets.clear()
+        self._active_physical_or_held.clear()
         self.mapper.reset()
 
 
@@ -745,6 +768,10 @@ class ProfileManager:
 
         if not loaded:
             raise ValueError(f"No valid profiles found in {self.profiles_dir}. Errors: {errors}")
+
+        if errors:
+            for err_msg in errors:
+                logger.warning("Failed to load profile: %s", err_msg)
 
         self.profiles = loaded
 
@@ -955,7 +982,8 @@ class ProfileManager:
             down_vk = parse_vk(raw_wasd["down"])
             left_vk = parse_vk(raw_wasd["left"])
             right_vk = parse_vk(raw_wasd["right"])
-            walk_vk = parse_vk(raw_wasd["walk"]) if "walk" in raw_wasd else None
+            walk_raw = raw_wasd.get("walk")
+            walk_vk = parse_vk(walk_raw) if walk_raw is not None else None
         except (KeyError, ValueError) as err:
             raise ValueError(f"Profile {path} invalid 'wasd_left_stick': {err}") from err
 

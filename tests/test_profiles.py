@@ -567,7 +567,7 @@ class TestWheelMappingAndGuideButtons:
         prof = ProfileManager.load_profile(p_file)
         mock_gamepad = MagicMock()
 
-        # Tick 1: Physical click (1-tick tap)
+        # Tick 1: Physical click (1-tick tap: initialized to 6, decremented to 5 on rising edge)
         prof.apply_buttons(
             gamepad=mock_gamepad,
             keys_pressed=None,
@@ -575,11 +575,11 @@ class TestWheelMappingAndGuideButtons:
             rbutton=False,
             mbutton=False,
         )
-        assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_A] == 6
+        assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_A] == 5
         mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
 
-        # Inactive ticks where hold counter decays from 6 to 0 (kept active)
-        for expected_counter in range(5, -1, -1):
+        # Inactive ticks where hold counter decays from 4 to 0 (kept active for 6 ticks total)
+        for expected_counter in range(4, -1, -1):
             mock_gamepad.reset_mock()
             prof.apply_buttons(
                 gamepad=mock_gamepad,
@@ -686,3 +686,497 @@ class TestWheelMappingAndGuideButtons:
         )
         assert prof._wheel_up_ticks == 7
         mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)
+
+    def test_held_button_long_press_zero_latency_release(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "long_hold_profile.json"
+        data = {
+            "name": "Long Hold Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "MOUSE_LEFT": "XUSB_GAMEPAD_A",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        mock_gamepad = MagicMock()
+
+        # Hold button down for 10 ticks (well past the 6-tick minimum hold duration)
+        for tick in range(1, 11):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=True,
+                rbutton=False,
+                mbutton=False,
+            )
+            mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+            if tick <= 5:
+                assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_A] == (6 - tick)
+            else:
+                # Expired after 6 decrement ticks from rising edge
+                assert vg.XUSB_BUTTON.XUSB_GAMEPAD_A not in prof._hold_counters
+
+        # Tick 11: Released after long hold -> zero release latency (released on this tick)
+        mock_gamepad.reset_mock()
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+        )
+        assert vg.XUSB_BUTTON.XUSB_GAMEPAD_A not in prof._hold_counters
+        mock_gamepad.release_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+
+    def test_held_button_exact_six_ticks_zero_latency_release(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "six_tick_hold_profile.json"
+        data = {
+            "name": "Six Tick Hold Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "MOUSE_LEFT": "XUSB_GAMEPAD_A",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        mock_gamepad = MagicMock()
+
+        # Hold for exactly 6 ticks (24 ms)
+        for tick in range(1, 7):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=True,
+                rbutton=False,
+                mbutton=False,
+            )
+            mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+            if tick <= 5:
+                assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_A] == (6 - tick)
+            else:
+                assert vg.XUSB_BUTTON.XUSB_GAMEPAD_A not in prof._hold_counters
+
+        # Tick 7: Released -> immediate 0 ms release (released on this tick)
+        mock_gamepad.reset_mock()
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+        )
+        assert vg.XUSB_BUTTON.XUSB_GAMEPAD_A not in prof._hold_counters
+        mock_gamepad.release_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+
+    def test_held_trigger_long_press_zero_latency_release(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "rt_hold_profile.json"
+        data = {
+            "name": "RT Hold Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "MOUSE_LEFT": "RT",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        mock_gamepad = MagicMock()
+
+        # Hold RT for 10 ticks
+        for _tick in range(1, 11):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=True,
+                rbutton=False,
+                mbutton=False,
+            )
+            mock_gamepad.right_trigger.assert_called_with(value=255)
+
+        # Tick 11: Released -> immediate 0 ms release
+        mock_gamepad.reset_mock()
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+        )
+        assert "RT" not in prof._hold_counters
+        mock_gamepad.right_trigger.assert_called_with(value=0)
+
+    def test_held_trigger_exact_six_ticks_zero_latency_release(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "rt_six_tick_profile.json"
+        data = {
+            "name": "RT Six Tick Hold Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "MOUSE_LEFT": "RT",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        mock_gamepad = MagicMock()
+
+        # Hold RT for exactly 6 ticks (24 ms)
+        for _tick in range(1, 7):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=True,
+                rbutton=False,
+                mbutton=False,
+            )
+            mock_gamepad.right_trigger.assert_called_with(value=255)
+
+        # Tick 7: Released -> immediate 0 ms release
+        mock_gamepad.reset_mock()
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+        )
+        assert "RT" not in prof._hold_counters
+        mock_gamepad.right_trigger.assert_called_with(value=0)
+
+    def test_fast_tap_one_tick_maintains_six_tick_minimum_duration(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "one_tick_tap_profile.json"
+        data = {
+            "name": "One Tick Tap Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "MOUSE_LEFT": "XUSB_GAMEPAD_X",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        mock_gamepad = MagicMock()
+
+        # Tick 1: Pressed physically (rising edge)
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=True,
+            rbutton=False,
+            mbutton=False,
+        )
+        mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
+        assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_X] == 5
+
+        # Ticks 2-6: Physically released, decays from 4 down to 0, remaining pressed for 6 ticks total
+        for expected_counter in range(4, -1, -1):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=False,
+                rbutton=False,
+                mbutton=False,
+            )
+            mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
+            if expected_counter > 0:
+                assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_X] == expected_counter
+            else:
+                assert vg.XUSB_BUTTON.XUSB_GAMEPAD_X not in prof._hold_counters
+
+        # Tick 7: Released with 0 ms latency once 6 ticks complete
+        mock_gamepad.reset_mock()
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+        )
+        mock_gamepad.release_button.assert_any_call(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
+
+    def test_short_hold_three_ticks_maintains_minimum_duration(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "short_hold_profile.json"
+        data = {
+            "name": "Short Hold Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "MOUSE_LEFT": "XUSB_GAMEPAD_B",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        mock_gamepad = MagicMock()
+
+        # Held for 3 ticks
+        for tick in range(1, 4):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=True,
+                rbutton=False,
+                mbutton=False,
+            )
+            mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_B)
+            assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_B] == (6 - tick)
+
+        assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_B] == 3
+
+        # Released on tick 4: decays from 2 down to 0, staying pressed for ticks 4, 5, 6 (total 6 ticks)
+        for expected_counter in range(2, -1, -1):
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=False,
+                rbutton=False,
+                mbutton=False,
+            )
+            mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_B)
+            if expected_counter > 0:
+                assert prof._hold_counters[vg.XUSB_BUTTON.XUSB_GAMEPAD_B] == expected_counter
+            else:
+                assert vg.XUSB_BUTTON.XUSB_GAMEPAD_B not in prof._hold_counters
+
+        # Following tick 7: released
+        mock_gamepad.reset_mock()
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+        )
+        mock_gamepad.release_button.assert_any_call(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_B)
+
+    def test_reset_controls_clears_hold_and_prev_targets(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "reset_profile.json"
+        data = {
+            "name": "Reset Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "MOUSE_LEFT": "XUSB_GAMEPAD_X",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        mock_gamepad = MagicMock()
+
+        prof.apply_buttons(
+            gamepad=mock_gamepad,
+            keys_pressed=None,
+            lbutton=True,
+            rbutton=False,
+            mbutton=False,
+        )
+        assert len(prof._hold_counters) > 0
+        assert len(prof._prev_physical_targets) > 0
+
+        prof.reset_controls(mock_gamepad)
+        assert len(prof._hold_counters) == 0
+        assert len(prof._prev_physical_targets) == 0
+
+    def test_profile_wasd_null_walk_key_accepted(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "null_walk_profile.json"
+        data = {
+            "name": "Null Walk Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68, "walk": None},
+            "buttons": {
+                "MOUSE_LEFT": "XUSB_GAMEPAD_A",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        assert prof.wasd.walk_key is None
+
+    def test_profile_multi_dot_reserved_device_names_rejected(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "con.test.json"
+        data = {
+            "name": "Reserved Name Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "MOUSE_LEFT": "XUSB_GAMEPAD_A",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ValueError, match="Windows reserved device name rejected"):
+            ProfileManager.load_profile(p_file)
+
+    def test_profile_com0_reserved_device_name_rejected(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "com0.json"
+        data = {
+            "name": "COM0 Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {
+                "MOUSE_LEFT": "XUSB_GAMEPAD_A",
+            },
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ValueError, match="Windows reserved device name rejected"):
+            ProfileManager.load_profile(p_file)
+
+    def test_profile_duplicate_wasd_keys_rejected(self, tmp_path: Path) -> None:
+        """Profiles with duplicate keys in wasd_left_stick must be rejected."""
+        p_file = tmp_path / "dup_wasd.json"
+        data = {
+            "name": "Dup WASD Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 87, "left": 65, "right": 68},
+            "buttons": {"MOUSE_LEFT": "XUSB_GAMEPAD_A"},
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ValueError, match="Duplicate keys in 'wasd_left_stick'"):
+            ProfileManager.load_profile(p_file)
+
+    def test_profile_unexpected_top_level_keys_rejected(self, tmp_path: Path) -> None:
+        """Profiles with unexpected schema keys must be rejected."""
+        p_file = tmp_path / "extra_keys.json"
+        data = {
+            "name": "Extra Keys Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {"MOUSE_LEFT": "XUSB_GAMEPAD_A"},
+            "malicious_key": True,
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ValueError, match="Unexpected top-level key.*in schema"):
+            ProfileManager.load_profile(p_file)
+
+    def test_subframe_tap_held_for_six_ticks_multiple_durations(self, tmp_path: Path) -> None:
+        """Verify that holds of 2, 4, and 5 ticks all hold for 6 ticks total and release on tick 7."""
+        p_file = tmp_path / "multi_dur_test.json"
+        data = {
+            "name": "Multi Duration Test",
+            "stick_config": {
+                "sensitivity": 1.0,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {"MOUSE_LEFT": "XUSB_GAMEPAD_X"},
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+
+        for press_duration in (2, 4, 5):
+            prof = ProfileManager.load_profile(p_file)
+            mock_gamepad = MagicMock()
+
+            # Physically hold for press_duration ticks
+            for _ in range(press_duration):
+                mock_gamepad.reset_mock()
+                prof.apply_buttons(
+                    gamepad=mock_gamepad,
+                    keys_pressed=None,
+                    lbutton=True,
+                    rbutton=False,
+                    mbutton=False,
+                )
+                mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
+
+            # Physically released: must stay held until tick 6 is complete
+            for _ in range(6 - press_duration):
+                mock_gamepad.reset_mock()
+                prof.apply_buttons(
+                    gamepad=mock_gamepad,
+                    keys_pressed=None,
+                    lbutton=False,
+                    rbutton=False,
+                    mbutton=False,
+                )
+                mock_gamepad.press_button.assert_called_with(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
+
+            # Tick 7: Expired, button must be released
+            mock_gamepad.reset_mock()
+            prof.apply_buttons(
+                gamepad=mock_gamepad,
+                keys_pressed=None,
+                lbutton=False,
+                rbutton=False,
+                mbutton=False,
+            )
+            mock_gamepad.release_button.assert_any_call(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_X)

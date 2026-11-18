@@ -153,6 +153,51 @@ class TestConcurrencyAndAtomicState:
         hooks._force_unhook()
         assert not hooks.active
 
+    def test_force_unhook_verifies_success_and_error_1404(self) -> None:
+        """_force_unhook zeroes hook handles only when UnhookWindowsHookEx succeeds or returns 1404."""
+        hooks = InputHooks()
+        hooks._kb_hook = 0xAAAA
+        hooks._mouse_hook = 0xBBBB
+
+        # Unhook fails with error code other than 1404 (e.g. 5: Access Denied) -> handles not zeroed
+        with patch.object(input_hooks._user32, "UnhookWindowsHookEx", return_value=0), patch.object(
+            input_hooks._kernel32, "GetLastError", return_value=5
+        ):
+            hooks._force_unhook()
+            assert hooks._kb_hook == 0xAAAA
+            assert hooks._mouse_hook == 0xBBBB
+
+        # Unhook returns 0 but GetLastError is 1404 (ERROR_INVALID_HOOK_HANDLE) -> handles zeroed
+        with patch.object(input_hooks._user32, "UnhookWindowsHookEx", return_value=0), patch.object(
+            input_hooks._kernel32, "GetLastError", return_value=1404
+        ):
+            hooks._force_unhook()
+            assert hooks._kb_hook == 0
+            assert hooks._mouse_hook == 0
+
+        # Normal successful unhook (returns 1)
+        hooks._kb_hook = 0x1111
+        hooks._mouse_hook = 0x2222
+        with patch.object(input_hooks._user32, "UnhookWindowsHookEx", return_value=1):
+            hooks._force_unhook()
+            assert hooks._kb_hook == 0
+            assert hooks._mouse_hook == 0
+
+    def test_f8_activation_exception_rolls_back_cleanly(self) -> None:
+        """Exception during F8 cursor initialization rolls back active state cleanly (SIL-04)."""
+        toggled: list[bool] = []
+        hooks = InputHooks(on_toggle=lambda st: toggled.append(st))
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_F8
+
+        with patch.object(input_hooks._user32, "GetSystemMetrics", side_effect=RuntimeError("System error")):
+            hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+
+        assert hooks.active is False
+        assert hooks._center_pt is None
+        assert hooks._last_pt is None
+        assert toggled == [False]
+
 
 class TestWin32APIErrorHandlingAndBounds:
     """Validate DPI awareness, SetConsoleCtrlHandler return codes, and GetCursorPos bounds."""
@@ -165,12 +210,35 @@ class TestWin32APIErrorHandlingAndBounds:
         ), patch.object(input_hooks._kernel32, "GetLastError", return_value=5):
             input_hooks._enable_per_monitor_dpi_awareness()
 
+    def test_dpi_awareness_shcore_and_user32_fallbacks(self) -> None:
+        """Verify fallback from SetProcessDpiAwarenessContext to shcore and user32."""
+        with patch.object(
+            input_hooks._user32, "SetProcessDpiAwarenessContext", side_effect=AttributeError
+        ), patch.object(
+            ctypes, "WinDLL"
+        ) as mock_windll:
+            mock_shcore = MagicMock()
+            mock_shcore.SetProcessDpiAwareness.return_value = 0
+            mock_windll.return_value = mock_shcore
+            input_hooks._enable_per_monitor_dpi_awareness()
+            mock_shcore.SetProcessDpiAwareness.assert_called_once_with(2)
+
+        with patch.object(
+            input_hooks._user32, "SetProcessDpiAwarenessContext", side_effect=AttributeError
+        ), patch.object(
+            ctypes, "WinDLL", side_effect=OSError("Not found")
+        ), patch.object(
+            input_hooks._user32, "SetProcessDPIAware", return_value=1
+        ) as mock_user32_dpi:
+            input_hooks._enable_per_monitor_dpi_awareness()
+            mock_user32_dpi.assert_called_once()
+
     def test_console_ctrl_handler_return_codes(self) -> None:
         hooks = InputHooks()
-        # Close/Logoff/Shutdown events must return 1 (TRUE) indicating handled
-        assert hooks._console_ctrl_handler(CTRL_CLOSE_EVENT) == 1
-        assert hooks._console_ctrl_handler(CTRL_LOGOFF_EVENT) == 1
-        assert hooks._console_ctrl_handler(CTRL_SHUTDOWN_EVENT) == 1
+        # All console ctrl events must return 0 (FALSE) so downstream handlers (e.g. AppLifecycle) receive them
+        assert hooks._console_ctrl_handler(CTRL_CLOSE_EVENT) == 0
+        assert hooks._console_ctrl_handler(CTRL_LOGOFF_EVENT) == 0
+        assert hooks._console_ctrl_handler(CTRL_SHUTDOWN_EVENT) == 0
 
         # Ctrl+C and Ctrl+Break must return 0 (FALSE) to allow Python SIGINT handler
         assert hooks._console_ctrl_handler(CTRL_C_EVENT) == 0
@@ -255,6 +323,27 @@ class TestEdgeCasesMessageProcessing:
         res = hooks._mouse_ll_proc(0, WM_MOUSEWHEEL, ctypes.addressof(ms))
         assert res == 1
         assert hooks.consume_wheel_delta() == -120
+
+    def test_mouse_horizontal_wheel_extraction(self) -> None:
+        """Horizontal wheel scroll delta (WM_MOUSEHWHEEL) extracted via bitwise logic."""
+        hooks = InputHooks()
+        hooks._active = True
+
+        ms = MSLLHOOKSTRUCT()
+        ms.flags = 0
+
+        # Positive horizontal delta (+120)
+        ms.mouseData = 120 << 16
+        res = hooks._mouse_ll_proc(0, input_hooks.WM_MOUSEHWHEEL, ctypes.addressof(ms))
+        assert res == 1
+        assert hooks.consume_wheel_delta() == 120
+
+    def test_custom_passthrough_keys_configuration(self) -> None:
+        """Constructor properly accepts and applies custom passthrough keys."""
+        hooks = InputHooks(passthrough_keys=[0x41, 0x42])
+        assert 0x41 in hooks._passthrough_keys
+        assert 0x42 in hooks._passthrough_keys
+        assert input_hooks.VK_LWIN not in hooks._passthrough_keys
 
     def test_xbutton_bitwise_processing(self) -> None:
         hooks = InputHooks()
@@ -734,3 +823,119 @@ class TestWindowSwitchAndPreCaptureKeys:
             hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
             assert hooks.active is True
             assert hooks._target_hwnd == 0xABCD
+
+    def test_foreground_window_chromium_fullscreen_pid_match(self) -> None:
+        """When Chromium toggles F11 fullscreen, matching process ID preserves capture and updates target HWND."""
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._target_hwnd = 0x1000
+        hooks._target_pid = 7777
+
+        def fake_pid(h: Any, ptr: Any) -> int:
+            ptr._obj.value = 7777
+            return 1
+
+        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x3000), patch.object(
+            input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid
+        ):
+            assert hooks.check_foreground_window() is True
+            assert hooks.active is True
+            assert hooks._target_hwnd == 0x3000
+
+    def test_foreground_window_different_process_auto_deactivates(self) -> None:
+        """Focusing an unrelated window belonging to a different process causes auto-deactivation."""
+        toggled: list[bool] = []
+        hooks = InputHooks(on_toggle=lambda st: toggled.append(st))
+        hooks._active = True
+        hooks._target_hwnd = 0x1000
+        hooks._target_pid = 7777
+
+        def diff_pid(h: Any, ptr: Any) -> int:
+            ptr._obj.value = 8888
+            return 1
+
+        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x4000), patch.object(
+            input_hooks._user32, "GetWindowThreadProcessId", side_effect=diff_pid
+        ):
+            assert hooks.check_foreground_window() is False
+            assert hooks.active is False
+            assert hooks._target_hwnd == 0
+            assert hooks._target_pid == 0
+            assert toggled == [False]
+
+    def test_foreground_window_null_hwnd_auto_deactivates(self) -> None:
+        """Focus lost to null/desktop causes auto-deactivation."""
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._target_hwnd = 0x1000
+
+        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0):
+            assert hooks.check_foreground_window() is False
+            assert hooks.active is False
+
+    def test_foreground_window_chromium_fullscreen_lazy_pid_resolution(self) -> None:
+        """When _target_pid is 0, check_foreground_window lazily queries and caches target PID."""
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._target_hwnd = 0x1000
+        assert hooks._target_pid == 0
+
+        def fake_pid(h: Any, ptr: Any) -> int:
+            ptr._obj.value = 5555
+            return 1
+
+        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x2500), patch.object(
+            input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid
+        ):
+            assert hooks.check_foreground_window() is True
+            assert hooks.active is True
+            assert hooks._target_pid == 5555
+            assert hooks._target_hwnd == 0x2500
+
+    def test_foreground_window_exception_auto_deactivates(self) -> None:
+        """If GetForegroundWindow raises an exception, foreground check safely auto-deactivates."""
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._target_hwnd = 0x1000
+        hooks._target_pid = 7777
+
+        with patch.object(input_hooks._user32, "GetForegroundWindow", side_effect=OSError("Win32 error")):
+            assert hooks.check_foreground_window() is False
+            assert hooks.active is False
+
+    def test_foreground_window_initial_zero_target_binds_to_current(self) -> None:
+        """If capture starts when foreground is 0 (desktop), it safely binds to foreground window."""
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._target_hwnd = 0
+        hooks._target_pid = 0
+
+        def fake_pid(h: Any, ptr: Any) -> int:
+            ptr._obj.value = 4321
+            return 1
+
+        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x5000), patch.object(
+            input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid
+        ):
+            assert hooks.check_foreground_window() is True
+            assert hooks.active is True
+            assert hooks._target_hwnd == 0x5000
+            assert hooks._target_pid == 4321
+
+    def test_check_foreground_window_aborts_if_deactivated_during_pid_query(self) -> None:
+        """If capture becomes inactive while querying PID, check_foreground_window returns False without modifying target."""
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._target_hwnd = 0x1000
+        hooks._target_pid = 7777
+
+        def deactivate_during_call(h: Any, ptr: Any) -> int:
+            hooks._active = False
+            ptr._obj.value = 7777
+            return 1
+
+        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x3000), patch.object(
+            input_hooks._user32, "GetWindowThreadProcessId", side_effect=deactivate_during_call
+        ):
+            assert hooks.check_foreground_window() is False
+            assert hooks._target_hwnd == 0x1000

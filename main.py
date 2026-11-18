@@ -57,30 +57,11 @@ except Exception:
     _kernel32 = None
 
 # Reserved MS-DOS/Windows device names (case-insensitive)
-_RESERVED_DEVICE_NAMES: frozenset[str] = frozenset({
-    "CON",
-    "PRN",
-    "AUX",
-    "NUL",
-    "COM1",
-    "COM2",
-    "COM3",
-    "COM4",
-    "COM5",
-    "COM6",
-    "COM7",
-    "COM8",
-    "COM9",
-    "LPT1",
-    "LPT2",
-    "LPT3",
-    "LPT4",
-    "LPT5",
-    "LPT6",
-    "LPT7",
-    "LPT8",
-    "LPT9",
-})
+_RESERVED_DEVICE_NAMES: frozenset[str] = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{i}" for i in range(0, 10)}
+    | {f"LPT{i}" for i in range(0, 10)}
+)
 
 MAX_CONSECUTIVE_TICK_ERRORS: int = 50
 TICK_ERROR_LOG_INTERVAL_SEC: float = 1.0
@@ -116,8 +97,8 @@ def validate_profile_name(name: str) -> tuple[bool, str]:
     if stripped.endswith("."):
         return False, "Profile name cannot end with a period."
 
-    # Check for reserved Windows device names (e.g. CON, NUL, COM1, CON.json)
-    base_stem = Path(stripped).stem.upper()
+    # Check for reserved Windows device names (e.g. CON, NUL, COM1, CON.json, con.test.json)
+    base_stem = stripped.split(".")[0].split(":")[0].strip().upper()
     if base_stem in _RESERVED_DEVICE_NAMES:
         return False, f"Profile name '{stripped}' refers to a reserved Windows device name."
 
@@ -636,9 +617,13 @@ def run_mapper(argv: list[str] | None = None) -> int:
                     if consecutive_tick_errors == 10:
                         try:
                             logger.info("Attempting ViGEmBus controller hot-reconnect at 10 consecutive tick errors.")
+                            new_pad = vg.VX360Gamepad()
+                            new_pad.reset()
+                            new_pad.update()
                             with contextlib.suppress(Exception):
-                                del gamepad
-                            gamepad = vg.VX360Gamepad()
+                                if lifecycle.gamepad is not None:
+                                    del lifecycle.gamepad
+                            gamepad = new_pad
                             lifecycle.gamepad = gamepad
                             last_controller_state = None
                         except Exception as reconnect_exc:

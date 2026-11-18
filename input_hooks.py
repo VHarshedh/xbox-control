@@ -11,11 +11,13 @@ import atexit
 import contextlib
 import ctypes
 import ctypes.wintypes as wt
+import os
 import signal
 import sys
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from types import TracebackType
 from typing import Any
 
@@ -233,6 +235,9 @@ _user32.ClipCursor.restype = wt.BOOL
 _user32.GetForegroundWindow.argtypes = []
 _user32.GetForegroundWindow.restype = wt.HWND
 
+_user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+_user32.GetWindowThreadProcessId.restype = wt.DWORD
+
 
 def _get_screen_center(current_pt: tuple[int, int] | None = None) -> tuple[int, int, wt.RECT | None]:
     """Calculate center coordinates for the screen or active monitor containing current_pt."""
@@ -304,7 +309,11 @@ def _enable_per_monitor_dpi_awareness() -> None:
 
     # 2. Try SetProcessDpiAwareness via shcore (Windows 8.1+)
     try:
-        shcore = ctypes.WinDLL("shcore.dll")
+        try:
+            shcore = ctypes.WinDLL("shcore.dll", winmode=0x00000800)
+        except (TypeError, OSError):
+            sys_dir = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+            shcore = ctypes.WinDLL(str(sys_dir / "shcore.dll"))
         shcore.SetProcessDpiAwareness.argtypes = [ctypes.c_int]
         shcore.SetProcessDpiAwareness.restype = ctypes.c_long  # HRESULT
         # PROCESS_PER_MONITOR_DPI_AWARE = 2
@@ -379,6 +388,7 @@ class InputHooks:
         self._xbutton2: bool = False
         self._wheel_delta: int = 0
         self._target_hwnd: int = 0
+        self._target_pid: int = 0
 
         # Hook handles (pointer-sized)
         self._kb_hook: int = 0
@@ -518,6 +528,7 @@ class InputHooks:
         """Reset capture state and release cursor clipping under self._lock."""
         self._active = False
         self._target_hwnd = 0
+        self._target_pid = 0
         self._center_pt = None
         self._last_pt = None
         self._keys_down.clear()
@@ -545,19 +556,61 @@ class InputHooks:
     def check_foreground_window(self) -> bool:
         """Check if target window still has focus; auto-deactivate if lost."""
         with self._lock:
-            if not self._active or self._target_hwnd == 0:
+            if not self._active:
                 return True
             target = self._target_hwnd
+            target_pid = self._target_pid
 
         try:
             cur_hwnd = int(_user32.GetForegroundWindow() or 0)
         except Exception:
-            return True
-
-        if cur_hwnd != target:
             self.deactivate()
             return False
-        return True
+
+        if cur_hwnd == 0:
+            self.deactivate()
+            return False
+
+        if target == 0:
+            # Capture activated without a valid foreground window; bind to current
+            cur_pid_dw = wt.DWORD(0)
+            with contextlib.suppress(Exception):
+                _user32.GetWindowThreadProcessId(wt.HWND(cur_hwnd), ctypes.byref(cur_pid_dw))
+            with self._lock:
+                if not self._active:
+                    return False
+                self._target_hwnd = cur_hwnd
+                self._target_pid = cur_pid_dw.value
+            return True
+
+        if cur_hwnd == target:
+            return True
+
+        # cur_hwnd != target: query cur_pid for cur_hwnd
+        cur_pid = wt.DWORD(0)
+        with contextlib.suppress(Exception):
+            _user32.GetWindowThreadProcessId(wt.HWND(cur_hwnd), ctypes.byref(cur_pid))
+
+        if target_pid == 0:
+            t_pid = wt.DWORD(0)
+            with contextlib.suppress(Exception):
+                _user32.GetWindowThreadProcessId(wt.HWND(target), ctypes.byref(t_pid))
+            target_pid = t_pid.value
+            if target_pid != 0:
+                with self._lock:
+                    if not self._active:
+                        return False
+                    self._target_pid = target_pid
+
+        if cur_pid.value != 0 and cur_pid.value == target_pid:
+            with self._lock:
+                if not self._active:
+                    return False
+                self._target_hwnd = cur_hwnd
+            return True
+
+        self.deactivate()
+        return False
 
     def stop(self) -> None:
         """Deactivate, unhook, stop the pump, and join the thread."""
@@ -652,14 +705,20 @@ class InputHooks:
     def _force_unhook(self) -> None:
         """Unhook both hooks if still installed (idempotent, thread-safe, reentrant)."""
         with self._cleanup_lock:
-            kb, self._kb_hook = self._kb_hook, 0
-            ms, self._mouse_hook = self._mouse_hook, 0
-        if kb:
-            with contextlib.suppress(Exception):
-                _user32.UnhookWindowsHookEx(kb)
-        if ms:
-            with contextlib.suppress(Exception):
-                _user32.UnhookWindowsHookEx(ms)
+            kb = self._kb_hook
+            ms = self._mouse_hook
+            if kb:
+                try:
+                    if _user32.UnhookWindowsHookEx(kb) or _kernel32.GetLastError() == 1404:  # ERROR_INVALID_HOOK_HANDLE
+                        self._kb_hook = 0
+                except Exception:
+                    self._kb_hook = 0
+            if ms:
+                try:
+                    if _user32.UnhookWindowsHookEx(ms) or _kernel32.GetLastError() == 1404:
+                        self._mouse_hook = 0
+                except Exception:
+                    self._mouse_hook = 0
         with contextlib.suppress(Exception):
             _user32.ClipCursor(None)
 
@@ -697,57 +756,68 @@ class InputHooks:
                             new_active = not self._active
 
                             if new_active:
-                                self._active = True
-                                self._target_hwnd = int(_user32.GetForegroundWindow() or 0)
-                                self._dx = self._dy = 0
-                                self._lbutton = False
-                                self._rbutton = False
-                                self._mbutton = False
-                                self._xbutton1 = False
-                                self._xbutton2 = False
-                                self._wheel_delta = 0
-                                self._keys_down.clear()
+                                try:
+                                    self._active = True
+                                    self._target_hwnd = int(_user32.GetForegroundWindow() or 0)
+                                    target_pid = wt.DWORD(0)
+                                    if self._target_hwnd != 0:
+                                        with contextlib.suppress(Exception):
+                                            _user32.GetWindowThreadProcessId(
+                                                wt.HWND(self._target_hwnd), ctypes.byref(target_pid)
+                                            )
+                                    self._target_pid = target_pid.value
+                                    self._dx = self._dy = 0
+                                    self._lbutton = False
+                                    self._rbutton = False
+                                    self._mbutton = False
+                                    self._xbutton1 = False
+                                    self._xbutton2 = False
+                                    self._wheel_delta = 0
+                                    self._keys_down.clear()
 
-                                # Determine screen and virtual monitor bounds
-                                vx = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-                                vy = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-                                vw = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-                                vh = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-                                if vw <= 0 or vh <= 0:
-                                    sm_cx = _user32.GetSystemMetrics(SM_CXSCREEN)
-                                    sm_cy = _user32.GetSystemMetrics(SM_CYSCREEN)
-                                    vx, vy = 0, 0
-                                    vw = sm_cx if sm_cx > 0 else 1920
-                                    vh = sm_cy if sm_cy > 0 else 1080
+                                    # Determine screen and virtual monitor bounds
+                                    vx = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+                                    vy = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+                                    vw = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+                                    vh = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+                                    if vw <= 0 or vh <= 0:
+                                        sm_cx = _user32.GetSystemMetrics(SM_CXSCREEN)
+                                        sm_cy = _user32.GetSystemMetrics(SM_CYSCREEN)
+                                        vx, vy = 0, 0
+                                        vw = sm_cx if sm_cx > 0 else 1920
+                                        vh = sm_cy if sm_cy > 0 else 1080
 
-                                # Query cursor coordinate on monitor before moving
-                                cur_pt = wt.POINT()
-                                cur_xy = None
-                                if (
-                                    _user32.GetCursorPos(ctypes.byref(cur_pt))
-                                    and vx <= cur_pt.x < vx + vw
-                                    and vy <= cur_pt.y < vy + vh
-                                ):
-                                    cur_xy = (cur_pt.x, cur_pt.y)
+                                    # Query cursor coordinate on monitor before moving
+                                    cur_pt = wt.POINT()
+                                    cur_xy = None
+                                    if (
+                                        _user32.GetCursorPos(ctypes.byref(cur_pt))
+                                        and vx <= cur_pt.x < vx + vw
+                                        and vy <= cur_pt.y < vy + vh
+                                    ):
+                                        cur_xy = (cur_pt.x, cur_pt.y)
 
-                                cx, cy, rc_mon = _get_screen_center(cur_xy)
-                                _user32.SetCursorPos(cx, cy)
-                                if rc_mon is not None:
-                                    with contextlib.suppress(Exception):
-                                        _user32.ClipCursor(ctypes.byref(rc_mon))
+                                    cx, cy, rc_mon = _get_screen_center(cur_xy)
+                                    _user32.SetCursorPos(cx, cy)
+                                    if rc_mon is not None:
+                                        with contextlib.suppress(Exception):
+                                            _user32.ClipCursor(ctypes.byref(rc_mon))
 
-                                # Read and validate landed cursor coordinate within bounds
-                                landed = wt.POINT()
-                                actual_pt = (cx, cy)
-                                if (
-                                    _user32.GetCursorPos(ctypes.byref(landed))
-                                    and vx <= landed.x < vx + vw
-                                    and vy <= landed.y < vy + vh
-                                ):
-                                    actual_pt = (landed.x, landed.y)
+                                    # Read and validate landed cursor coordinate within bounds
+                                    landed = wt.POINT()
+                                    actual_pt = (cx, cy)
+                                    if (
+                                        _user32.GetCursorPos(ctypes.byref(landed))
+                                        and vx <= landed.x < vx + vw
+                                        and vy <= landed.y < vy + vh
+                                    ):
+                                        actual_pt = (landed.x, landed.y)
 
-                                self._center_pt = actual_pt
-                                self._last_pt = actual_pt
+                                    self._center_pt = actual_pt
+                                    self._last_pt = actual_pt
+                                except Exception:
+                                    self._deactivate_locked()
+                                    new_active = False
                             else:
                                 self._deactivate_locked()
 
@@ -910,11 +980,10 @@ class InputHooks:
     # ── Console Control Handler ──────────────────────────────────────────
 
     def _console_ctrl_handler(self, ctrl_type: int) -> int:
-        """Handle console close, break, or shutdown events cleanly."""
+        """Handle console close, break, or shutdown events cleanly without masking downstream handlers."""
         self.stop()
-        if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
-            return 1  # TRUE: handled, cleanup complete
-        return 0  # FALSE: pass through to Python runtime for CTRL_C / CTRL_BREAK (SIGINT)
+        # Return 0 (FALSE) so downstream application handlers (e.g. AppLifecycle) receive the event!
+        return 0
 
     # ── Failsafe Registration ────────────────────────────────────────────
 

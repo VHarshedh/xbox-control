@@ -179,6 +179,34 @@ class TestMouseToStickMapper:
         with pytest.raises(ValueError, match="sensitivity must be > 0"):
             MouseToStickMapper(sensitivity=-0.01)
 
+    def test_mapper_smoothing_alpha_validation(self) -> None:
+        """smoothing_alpha must be finite and in (0.0, 1.0]."""
+        with pytest.raises(ValueError, match="smoothing_alpha must be finite and in"):
+            MouseToStickMapper(smoothing_alpha=0.0)
+        with pytest.raises(ValueError, match="smoothing_alpha must be finite and in"):
+            MouseToStickMapper(smoothing_alpha=1.5)
+        with pytest.raises(ValueError, match="smoothing_alpha must be finite and in"):
+            MouseToStickMapper(smoothing_alpha=float("nan"))
+
+        mapper = MouseToStickMapper(smoothing_alpha=0.75)
+        assert mapper._alpha == pytest.approx(0.75)
+
+    def test_mapper_zero_decay_rate_immediate_snap(self) -> None:
+        """When decay_rate == 0.0, stick snaps immediately to (0, 0) on the very first idle decay tick."""
+        mapper = MouseToStickMapper(
+            sensitivity=0.1,
+            decay_rate=0.0,
+            smoothing=0.0,
+            deadzone_comp=0.0,
+            curve_exponent=1.0,
+        )
+        rx1, _ = mapper.step(20, 0, TARGET_DT)
+        assert rx1 > 0
+        # Tick 2: first idle tick with decay_rate == 0.0 snaps immediately to 0
+        rx2, ry2 = mapper.step(0, 0, TARGET_DT)
+        assert rx2 == 0
+        assert ry2 == 0
+
         with pytest.raises(ValueError, match="curve_exponent must be > 0"):
             MouseToStickMapper(curve_exponent=0.0)
 
@@ -354,6 +382,84 @@ class TestDLLLoadingAndServiceSecurity:
             ok, msg = driver_check.stop_vigembus_service()
             assert ok is True
             assert "stopped successfully" in msg
+
+    def test_driver_check_service_not_installed_error_1060(self) -> None:
+        """When OpenServiceW returns NULL with ERROR_SERVICE_DOES_NOT_EXIST (1060), returns not installed msg."""
+        mock_advapi = MagicMock()
+        mock_advapi.OpenSCManagerW.return_value = 100
+        mock_advapi.OpenServiceW.return_value = None
+
+        with patch("driver_check._load_advapi32", return_value=mock_advapi), patch(
+            "ctypes.get_last_error", return_value=1060
+        ):
+            ok, msg = driver_check.check_vigembus_service()
+            assert ok is False
+            assert "ViGEmBus driver/service is NOT installed" in msg
+
+    def test_restart_vigembus_service_success_and_failure(self) -> None:
+        """Test restart_vigembus_service under both successful and failing stop/start conditions."""
+        with patch("driver_check.stop_vigembus_service", return_value=(True, "stopped")), patch(
+            "driver_check.start_vigembus_service", return_value=(True, "started")
+        ), patch("time.sleep"):
+            ok, msg = driver_check.restart_vigembus_service()
+            assert ok is True
+            assert "started" in msg
+
+        with patch(
+            "driver_check.stop_vigembus_service",
+            return_value=(False, "access denied"),
+        ):
+            ok, msg = driver_check.restart_vigembus_service()
+            assert ok is False
+            assert "Restart failed during service stop phase" in msg
+
+        # When service was already stopped, proceeds to start phase
+        with patch(
+            "driver_check.stop_vigembus_service",
+            return_value=(False, "ViGEmBus service is already stopped."),
+        ), patch(
+            "driver_check.start_vigembus_service", return_value=(True, "started")
+        ), patch("time.sleep"):
+            ok, msg = driver_check.restart_vigembus_service()
+            assert ok is True
+            assert "started" in msg
+
+    def test_check_python_version_boundary_cases(self) -> None:
+        """Verify check_python_version accurately compares major and minor versions."""
+        from collections import namedtuple
+
+        VInfo = namedtuple("VInfo", ["major", "minor", "micro"])
+
+        with patch("sys.version_info", VInfo(3, 12, 5)):
+            ok, msg = driver_check.check_python_version(3, 12)
+            assert ok is True
+            assert ">=" in msg
+
+            ok, msg = driver_check.check_python_version(3, 13)
+            assert ok is False
+            assert "<" in msg
+
+        with patch("sys.version_info", VInfo(3, 11, 9)):
+            ok, msg = driver_check.check_python_version(3, 12)
+            assert ok is False
+
+        with patch("sys.version_info", VInfo(4, 0, 0)):
+            ok, msg = driver_check.check_python_version(3, 12)
+            assert ok is True
+
+    def test_check_windows_os_non_windows_rejected(self) -> None:
+        """Verify check_windows_os returns False and error message on non-Windows platforms."""
+        with patch("platform.system", return_value="Linux"):
+            ok, msg = driver_check.check_windows_os()
+            assert ok is False
+            assert "Unsupported OS 'Linux'" in msg
+
+        with patch("platform.system", return_value="Windows"), patch(
+            "platform.version", return_value="10.0.19045"
+        ):
+            ok, msg = driver_check.check_windows_os()
+            assert ok is True
+            assert "Windows 10.0.19045" in msg
 
 
 class TestMathAndSignalSafety:

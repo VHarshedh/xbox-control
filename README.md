@@ -72,6 +72,17 @@ Designed for PC gaming, remote play, and accessibility with strict memory limits
 3. **Thumbstick Signal Processing**:
    - **Right Stick**: Exponential Moving Average (EMA) smoothing filters micro-jitter, followed by a radial power curve ($r^{\text{exponent}}$). A deadzone compensation offset maps $[0, 1] \rightarrow [\text{deadzone}, 1.0]$, bypassing controller deadzones in modern game engines.
    - **Left Stick**: WASD keys are combined into $(w_x, w_y)$ vectors and normalized on diagonals by $1/\sqrt{2}$ so radial deflection never exceeds unit magnitude ($32767$).
+   - **Walk Modifier**: Optional `walk` key in `wasd_left_stick` (e.g. `VK_LMENU` / Left Alt) scales deflection by 50% for stealth and precision positioning.
+
+---
+
+## Key Features
+
+- **WHEEL_UP / WHEEL_DOWN Weapon Switching**: Scroll-wheel notch events are converted into pulse actions (e.g. mapped to `XUSB_GAMEPAD_Y`) with minimum hold durations and inter-notch release gaps for dependable weapon cycling.
+- **Xbox Guide Button Support (`VK_HOME`)**: Direct mapping to `XUSB_GAMEPAD_GUIDE` allows opening the Xbox Game Bar, Steam overlay, or dashboard overlays directly from the keyboard.
+- **Walk Speed Modifier**: Configurable `walk` modifier in `wasd_left_stick` scales analog stick magnitude by 0.5 when held.
+- **Alt+Tab & Focus-Loss Auto-Release**: Background foreground-window monitoring detects window switching (`Alt+Tab`, Windows key, lock screen, or clicking out) and immediately deactivates capture while resetting all virtual buttons to prevent stuck inputs.
+- **F11 Fullscreen Passthrough**: Window monitoring tracks browser process IDs (PID), maintaining active capture when toggling F11 fullscreen in Chrome or Edge across top-level container HWND changes.
 
 ---
 
@@ -145,6 +156,8 @@ options:
 |---|---|
 | `F8` | **Toggle Capture ON / OFF**. When active, all mouse and keyboard inputs are captured and swallowed. |
 | `F9` | **Cycle Profiles**. Seamlessly rotates through available profiles (e.g. Shooter $\leftrightarrow$ RTS / Menu) without input drop. |
+| `F11` | **Fullscreen Passthrough**. Allows browser and game fullscreen toggling without dropping capture or leaking input. |
+| `Alt+Tab` | **Auto-Release & Focus Loss Deactivation**. Automatically deactivates capture and releases all controller buttons on focus switch. |
 | `Ctrl+C` | Cleanly release hooks, reset virtual gamepad, and exit. |
 
 ---
@@ -168,18 +181,32 @@ Profiles are stored as JSON files under `profiles/`.
         "up": 87,
         "down": 83,
         "left": 65,
-        "right": 68
+        "right": 68,
+        "walk": "VK_LMENU"
     },
     "buttons": {
         "MOUSE_LEFT": "RT",
         "MOUSE_RIGHT": "LT",
-        "MOUSE_X1": "XUSB_GAMEPAD_LEFT_SHOULDER",
+        "MOUSE_MIDDLE": "XUSB_GAMEPAD_RIGHT_THUMB",
+        "MOUSE_X1": "XUSB_GAMEPAD_RIGHT_SHOULDER",
+        "MOUSE_X2": "XUSB_GAMEPAD_LEFT_SHOULDER",
         "VK_SPACE": "XUSB_GAMEPAD_A",
         "VK_LSHIFT": "XUSB_GAMEPAD_LEFT_THUMB",
-        "VK_E": "XUSB_GAMEPAD_X",
-        "VK_R": "XUSB_GAMEPAD_Y",
+        "VK_R": "XUSB_GAMEPAD_X",
+        "VK_E": "XUSB_GAMEPAD_Y",
+        "VK_C": "XUSB_GAMEPAD_B",
+        "VK_F": "XUSB_GAMEPAD_RIGHT_THUMB",
+        "VK_Q": "XUSB_GAMEPAD_LEFT_SHOULDER",
+        "VK_G": "XUSB_GAMEPAD_RIGHT_SHOULDER",
         "VK_TAB": "XUSB_GAMEPAD_BACK",
-        "VK_ESCAPE": "XUSB_GAMEPAD_START"
+        "VK_ESCAPE": "XUSB_GAMEPAD_START",
+        "VK_1": "XUSB_GAMEPAD_DPAD_UP",
+        "VK_2": "XUSB_GAMEPAD_DPAD_RIGHT",
+        "VK_3": "XUSB_GAMEPAD_DPAD_DOWN",
+        "VK_4": "XUSB_GAMEPAD_DPAD_LEFT",
+        "WHEEL_UP": "XUSB_GAMEPAD_Y",
+        "WHEEL_DOWN": "XUSB_GAMEPAD_Y",
+        "VK_HOME": "XUSB_GAMEPAD_GUIDE"
     }
 }
 ```
@@ -192,6 +219,7 @@ Profiles are stored as JSON files under `profiles/`.
 - `decay_rate` *(float $\in [0.0, 1.0]$)*: Auto-recentering factor applied each tick when mouse is idle.
 - `smoothing_alpha` *(float $\in (0.0, 1.0]$)*: Exponential moving average weight for new mouse samples ($0.75$ = snappy, $0.35$ = heavy smoothing).
 - `invert_y` *(bool)*: Set `true` to invert vertical look (flight sim mode).
+- `walk` *(str or int, optional)*: Key in `wasd_left_stick` to scale thumbstick deflection by 0.5 (e.g. `"VK_LMENU"`).
 
 ---
 
