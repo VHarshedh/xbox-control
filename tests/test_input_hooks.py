@@ -31,6 +31,7 @@ from input_hooks import (
     VK_F10,
     VK_F11,
     VK_LWIN,
+    VK_OEM_3,
     VK_RWIN,
     VK_TAB,
     WM_KEYDOWN,
@@ -1162,3 +1163,42 @@ class TestWindowSwitchAndPreCaptureKeys:
             assert hooks.active is True
             assert hooks._target_hwnd == 0x2000
             assert hooks._target_pid == 5002
+
+    def test_momentary_ui_clutch_activation_and_release(self) -> None:
+        """Holding ~ (VK_OEM_3) temporarily unswallows events and unclips cursor; releasing restores capture."""
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._center_pt = (960, 540)
+        hooks._last_pt = (960, 540)
+
+        kbd_down = KBDLLHOOKSTRUCT()
+        kbd_down.vkCode = VK_OEM_3
+        kbd_down.flags = 0
+
+        with (
+            patch.object(input_hooks._user32, "CallNextHookEx", return_value=42),
+            patch.object(input_hooks._user32, "ClipCursor") as mock_clip,
+            patch.object(input_hooks._user32, "SetCursorPos") as mock_set_cursor,
+        ):
+            # 1. Keydown on ~: activates clutch, unclips cursor
+            res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd_down))
+            assert res == 42
+            assert hooks.clutch_active is True
+            mock_clip.assert_called_with(None)
+
+            # 2. While clutch is active, mouse move passes through to Windows/Chrome
+            ms = MSLLHOOKSTRUCT()
+            ms.flags = 0
+            ms.pt.x = 500
+            ms.pt.y = 300
+            res_m = hooks._mouse_ll_proc(0, WM_MOUSEMOVE, ctypes.addressof(ms))
+            assert res_m == 42
+
+            # 3. Keyup on ~: deactivates clutch, recenters cursor to (960, 540)
+            kbd_up = KBDLLHOOKSTRUCT()
+            kbd_up.vkCode = VK_OEM_3
+            kbd_up.flags = 0
+            res_up = hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd_up))
+            assert res_up == 42
+            assert hooks.clutch_active is False
+            mock_set_cursor.assert_called_with(960, 540)

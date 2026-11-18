@@ -49,6 +49,7 @@ WM_MOUSEHWHEEL: int = 0x020E
 
 WM_QUIT: int = 0x0012
 VK_TAB: int = 0x09
+VK_OEM_3: int = 0xC0
 VK_F7: int = 0x76
 VK_F8: int = 0x77
 VK_F9: int = 0x78
@@ -447,6 +448,9 @@ class InputHooks:
         self._f8_held: bool = False
         self._f9_held: bool = False
         self._f10_held: bool = False
+        self._clutch_held: bool = False
+        self._clutch_active: bool = False
+        self._monitor_rc: wt.RECT | None = None
         self._wake_requested: bool = False
         self._profile_cycle_requested: bool = False
         self._stick_swap_requested: bool = False
@@ -514,6 +518,12 @@ class InputHooks:
                 and self._kb_hook != 0
                 and self._mouse_hook != 0
             )
+
+    @property
+    def clutch_active(self) -> bool:
+        """Whether the momentary UI clutch (~ key) is currently held."""
+        with self._lock:
+            return self._clutch_active
 
     # ── Consumer API (thread-safe) ───────────────────────────────────────
 
@@ -633,6 +643,9 @@ class InputHooks:
         self._dx = 0
         self._dy = 0
         self._wheel_delta = 0
+        self._clutch_held = False
+        self._clutch_active = False
+        self._monitor_rc = None
         with contextlib.suppress(Exception):
             _user32.ClipCursor(None)
 
@@ -941,6 +954,7 @@ class InputHooks:
                                         cur_xy = (cur_pt.x, cur_pt.y)
 
                                     cx, cy, rc_mon = _get_screen_center(cur_xy)
+                                    self._monitor_rc = rc_mon
                                     _user32.SetCursorPos(cx, cy)
                                     if rc_mon is not None:
                                         with contextlib.suppress(Exception):
@@ -1047,6 +1061,49 @@ class InputHooks:
                     )
                 )
 
+            # ── Momentary UI Clutch Hotkey (~ / Backtick) ──
+            if vk == VK_OEM_3:
+                if not is_injected:
+                    if wParam in _KEY_DOWN_MSGS and not self._clutch_held:
+                        self._clutch_held = True
+                        with self._lock:
+                            self._clutch_active = True
+                        with contextlib.suppress(Exception):
+                            _user32.ClipCursor(None)
+                    elif wParam in _KEY_UP_MSGS:
+                        self._clutch_held = False
+                        with self._lock:
+                            self._clutch_active = False
+                            if self._active and self._center_pt is not None:
+                                cx, cy = self._center_pt
+                                with contextlib.suppress(Exception):
+                                    _user32.SetCursorPos(cx, cy)
+                                self._last_pt = (cx, cy)
+                                if self._monitor_rc is not None:
+                                    with contextlib.suppress(Exception):
+                                        _user32.ClipCursor(ctypes.byref(self._monitor_rc))
+
+                # Pass through the clutch key so Windows/Chrome can process it
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
+
+            # ── Clutch active: pass all keys through to Windows/Chrome ──
+            if self._clutch_active:
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
+
             # ── Auto-Deactivate on Window Switch (Alt+Tab / Win key) ──
             if self._active and (
                 vk in (VK_LWIN, VK_RWIN) or (bool(kbd.flags & LLKHF_ALTDOWN) and vk == VK_TAB)
@@ -1107,7 +1164,7 @@ class InputHooks:
     ) -> int:
         """``WH_MOUSE_LL`` callback — capture mouse or pass through."""
         try:
-            if nCode < 0 or not self._active:
+            if nCode < 0 or not self._active or self._clutch_active:
                 return int(
                     _user32.CallNextHookEx(
                         self._mouse_hook,
@@ -1129,7 +1186,7 @@ class InputHooks:
             msg: int = wParam
 
             with self._lock:
-                if not self._active:
+                if not self._active or self._clutch_active:
                     return int(
                         _user32.CallNextHookEx(
                             self._mouse_hook,

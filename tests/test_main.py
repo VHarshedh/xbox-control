@@ -1893,3 +1893,92 @@ class TestMouseStickRouting:
                 if c == ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB})
             ]
             assert len(press_calls) >= 1
+
+    def test_mouse_stick_left_routes_wasd_to_left_when_mouse_stationary(self) -> None:
+        """When mouse_stick is 'left' and mouse is stationary, WASD directly drives Left Stick for menu navigation."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            _ = mock_timer
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (0, 0)  # Stationary mouse!
+            hooks_inst.get_keys_pressed.return_value = {87}  # 'W' key (Up)
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 1:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "rts_menu"])
+                assert ret == 0
+
+            # When mouse is stationary, Left Stick receives WASD (W = Up) for menu navigation
+            lj_calls = pad_instance.left_joystick.call_args_list
+            assert len(lj_calls) >= 1
+            assert lj_calls[0][1]["y_value"] == 32767
+            assert lj_calls[0][1]["x_value"] == 0
+
+            # Right Stick also receives WASD for map panning
+            rj_calls = pad_instance.right_joystick.call_args_list
+            assert len(rj_calls) >= 1
+            assert rj_calls[0][1]["y_value"] == 32767
+
+    def test_browser_focus_triggers_auto_wakeup_pulse(self) -> None:
+        """Switching focus to Chrome/Edge immediately pulses L3 + A without waiting for idle timer."""
+
+        def fake_pid(h: Any, ptr: Any) -> int:
+            ptr._obj.value = 1234
+            return 1
+
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+            patch.object(main._user32, "GetForegroundWindow", return_value=0x1000),
+            patch.object(main._user32, "GetWindowThreadProcessId", side_effect=fake_pid),
+            patch("main.get_process_image_name", return_value="chrome.exe"),
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            _ = mock_timer
+            hooks_inst.active = False
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_wake_pulse.return_value = False
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.consume_stick_swap.return_value = False
+
+            loop_count = 0
+
+            def fake_sleep(duration: float) -> None:
+                nonlocal loop_count
+                loop_count += 1
+                if loop_count > 2:
+                    raise KeyboardInterrupt
+
+            with patch("time.sleep", side_effect=fake_sleep):
+                ret = run_mapper(["--profile", "Shooter"])
+                assert ret == 0
+
+            # Both Left Thumb and A button must have been pressed
+            press_calls = pad_instance.press_button.call_args_list
+            assert ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB}) in press_calls
+            assert ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_A}) in press_calls

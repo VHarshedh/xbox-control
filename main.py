@@ -31,7 +31,7 @@ from driver_check import (
     check_windows_os,
     is_headless_ci,
 )
-from input_hooks import VK_F8, InputHookManager
+from input_hooks import VK_F8, InputHookManager, get_process_image_name
 from profiles import ProfileManager
 from stick_mapper import TARGET_HZ, HighResTimer, _track_period_released, _winmm
 
@@ -527,6 +527,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
 
         print(f"  [OK] Controller created (Active Profile: {profile_mgr.current_profile.name})")
         print("  Controls:")
+        print("    [~]  Hold for Momentary UI Clutch (free mouse to click Chrome popups)")
         print("    [F7] Wake Controller (pulse L3+A to Chrome/Edge without capturing mouse)")
         print("    [F8] Toggle Input Capture ON / OFF")
         print("    [F9] Cycle Profiles (Shooter <-> RTS / Menu)")
@@ -567,6 +568,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
         wakeup_button_held: bool = False
         stick_swap_override: bool = False
         last_idle_wake_time: float = time.monotonic()
+        prev_fg_exe: str = ""
 
         try:
             while not lifecycle.shutdown_event.is_set():
@@ -577,7 +579,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
                     return 1
 
                 # ── Profile cycling hotkey check (F9 consumed from hook thread) ──
-                if hooks.consume_profile_cycle():
+                if hooks.consume_profile_cycle() is True:
                     try:
                         wakeup_ticks_remaining = 0
                         if wakeup_button_held:
@@ -680,14 +682,54 @@ def run_mapper(argv: list[str] | None = None) -> int:
                 # ── Inactive idle path: save CPU cycles but keep controller alive in browser ──
                 if not active:
                     now = time.monotonic()
-                    if now - last_idle_wake_time >= IDLE_WAKE_INTERVAL_SEC:
+                    cur_hwnd = int(_user32.GetForegroundWindow() or 0) if _user32 else 0
+                    cur_pid = wt.DWORD(0)
+                    if cur_hwnd != 0 and _user32:
+                        with contextlib.suppress(Exception):
+                            _user32.GetWindowThreadProcessId(
+                                wt.HWND(cur_hwnd), ctypes.byref(cur_pid)
+                            )
+                    cur_fg_exe = get_process_image_name(cur_pid.value) if cur_pid.value != 0 else ""
+                    browser_focused = cur_fg_exe in {
+                        "chrome.exe",
+                        "msedge.exe",
+                        "brave.exe",
+                        "opera.exe",
+                        "firefox.exe",
+                    }
+                    browser_just_gained_focus = browser_focused and (cur_fg_exe != prev_fg_exe)
+                    prev_fg_exe = cur_fg_exe
+
+                    wake_requested = hooks.consume_wake_pulse() is True
+                    should_wake = (
+                        wake_requested
+                        or browser_just_gained_focus
+                        or (now - last_idle_wake_time >= IDLE_WAKE_INTERVAL_SEC)
+                    )
+
+                    if should_wake:
                         try:
                             gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                            if wake_requested or browser_just_gained_focus:
+                                gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
                             gamepad.update()
                             time.sleep(0.040)
                             gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                            if wake_requested or browser_just_gained_focus:
+                                gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
                             gamepad.update()
                             last_idle_wake_time = now
+                            if wake_requested:
+                                print(
+                                    "[WAKE] Controller wakeup pulse sent to browser (A + L3)",
+                                    flush=True,
+                                )
+                                logger.debug("Explicit F7 controller wakeup pulse sent.")
+                            elif browser_just_gained_focus:
+                                print(
+                                    f"[BROWSER] Focus on {cur_fg_exe} detected — auto-pulsed controller wakeup (A + L3)",
+                                    flush=True,
+                                )
                         except Exception as idle_wake_exc:
                             logger.warning("Error during idle controller wakeup: %s", idle_wake_exc)
                     time.sleep(0.010)
@@ -742,10 +784,16 @@ def run_mapper(argv: list[str] | None = None) -> int:
 
                     # C. Route mouse and WASD outputs to joysticks based on effective mouse stick
                     if effective_mouse_stick == "left":
-                        gamepad.left_joystick(x_value=stick_mx, y_value=stick_my)
-                        gamepad.right_joystick(x_value=stick_wx, y_value=stick_wy)
-                        rx, ry = stick_wx, stick_wy
-                        lx, ly = stick_mx, stick_my
+                        # In RTS / Menu mode: when mouse is idle in menus, WASD directly drives Left Stick!
+                        # When mouse moves, mouse drives Left Stick, and WASD drives Right Stick for camera panning.
+                        if stick_mx == 0 and stick_my == 0:
+                            lx, ly = stick_wx, stick_wy
+                            rx, ry = stick_wx, stick_wy
+                        else:
+                            lx, ly = stick_mx, stick_my
+                            rx, ry = stick_wx, stick_wy
+                        gamepad.left_joystick(x_value=lx, y_value=ly)
+                        gamepad.right_joystick(x_value=rx, y_value=ry)
                     else:
                         gamepad.right_joystick(x_value=stick_mx, y_value=stick_my)
                         gamepad.left_joystick(x_value=stick_wx, y_value=stick_wy)
