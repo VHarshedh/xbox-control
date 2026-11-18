@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import vgamepad_compat  # noqa: F401  # isort: skip
+
 from unittest.mock import MagicMock, patch
 
 import vgamepad.api as api
-
-import vgamepad_compat
 
 
 class TestVGamepadCompat:
