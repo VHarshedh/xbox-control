@@ -633,6 +633,20 @@ class InputHooks:
                         return False
                     self._target_pid = target_pid
 
+        # If previous target was the terminal/console launcher, adopt the newly focused window
+        terminal_pids = {os.getpid()}
+        if hasattr(os, "getppid"):
+            with contextlib.suppress(Exception):
+                terminal_pids.add(os.getppid())
+
+        if target_pid in terminal_pids and cur_pid.value != 0:
+            with self._lock:
+                if not self._active:
+                    return False
+                self._target_hwnd = cur_hwnd
+                self._target_pid = cur_pid.value
+            return True
+
         if cur_pid.value != 0 and cur_pid.value == target_pid:
             with self._lock:
                 if not self._active:

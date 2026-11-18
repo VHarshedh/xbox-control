@@ -157,6 +157,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="List all available profiles and exit",
     )
     parser.add_argument(
+        "--active",
+        "-a",
+        action="store_true",
+        help="Start with input capture enabled immediately (no F8 needed)",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -545,6 +551,10 @@ def run_mapper(argv: list[str] | None = None) -> int:
             print(f"[FAIL] Failed to initialize high-resolution timer: {exc}", file=sys.stderr)
             return 1
 
+        if getattr(args, "active", False):
+            with hooks._lock:
+                hooks._active = True
+
         was_active = False
         consecutive_tick_errors = 0
         last_tick_error_log = 0.0
@@ -726,13 +736,16 @@ def run_mapper(argv: list[str] | None = None) -> int:
                         wheel_delta=wheel_delta,
                     )
 
-                    # Chromium GamepadProvider button user-gesture wakeup (L3 pulse on F8)
+                    # Chromium GamepadProvider button user-gesture wakeup (L3 + A pulse on F8)
                     if wakeup_pulse_active:
                         gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                        gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
                         wakeup_button_held = True
                     elif wakeup_button_held:
                         if not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB):
                             gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                        if not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_A):
+                            gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
                         wakeup_button_held = False
 
                     # E. Commit report to ViGEmBus if state changed or heartbeat reached
