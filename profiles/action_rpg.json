@@ -1,0 +1,40 @@
+{
+    "name": "Action / RPG",
+    "stick_config": {
+        "sensitivity": 0.075,
+        "curve_exponent": 1.25,
+        "deadzone_comp": 0.16,
+        "decay_rate": 0.75,
+        "smoothing_alpha": 0.75,
+        "invert_y": false,
+        "mouse_stick": "right"
+    },
+    "wasd_left_stick": {
+        "up": 87,
+        "down": 83,
+        "left": 65,
+        "right": 68
+    },
+    "buttons": {
+        "MOUSE_LEFT": "XUSB_GAMEPAD_RIGHT_SHOULDER",
+        "MOUSE_RIGHT": "RT",
+        "MOUSE_MIDDLE": "XUSB_GAMEPAD_RIGHT_THUMB",
+        "MOUSE_X1": "LT",
+        "MOUSE_X2": "XUSB_GAMEPAD_LEFT_SHOULDER",
+        "VK_SPACE": "XUSB_GAMEPAD_B",
+        "VK_F": "XUSB_GAMEPAD_A",
+        "VK_E": "XUSB_GAMEPAD_Y",
+        "VK_R": "XUSB_GAMEPAD_X",
+        "VK_LSHIFT": "XUSB_GAMEPAD_LEFT_THUMB",
+        "VK_Q": "LT",
+        "VK_1": "XUSB_GAMEPAD_DPAD_UP",
+        "VK_2": "XUSB_GAMEPAD_DPAD_RIGHT",
+        "VK_3": "XUSB_GAMEPAD_DPAD_DOWN",
+        "VK_4": "XUSB_GAMEPAD_DPAD_LEFT",
+        "WHEEL_UP": "XUSB_GAMEPAD_DPAD_UP",
+        "WHEEL_DOWN": "XUSB_GAMEPAD_DPAD_DOWN",
+        "VK_TAB": "XUSB_GAMEPAD_BACK",
+        "VK_ESCAPE": "XUSB_GAMEPAD_START",
+        "VK_HOME": "XUSB_GAMEPAD_GUIDE"
+    }
+}

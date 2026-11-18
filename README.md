@@ -156,6 +156,7 @@ options:
 |---|---|
 | `F8` | **Toggle Capture ON / OFF**. When active, all mouse and keyboard inputs are captured and swallowed. |
 | `F9` | **Cycle Profiles**. Seamlessly rotates through available profiles (e.g. Shooter $\leftrightarrow$ RTS / Menu) without input drop. |
+| `F10` | **Swap Mouse Stick (Right Stick <-> Left Stick)**. Live toggle swapping physical mouse control between Right Stick and Left Stick. |
 | `F11` | **Fullscreen Passthrough**. Allows browser and game fullscreen toggling without dropping capture or leaking input. |
 | `Alt+Tab` | **Auto-Release & Focus Loss Deactivation**. Automatically deactivates capture and releases all controller buttons on focus switch. |
 | `Ctrl+C` | Cleanly release hooks, reset virtual gamepad, and exit. |

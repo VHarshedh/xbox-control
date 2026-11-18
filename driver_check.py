@@ -25,6 +25,7 @@ logger = logging.getLogger("driver_check")
 
 class Status(IntEnum):
     """Exit codes for the verification script."""
+
     PASS = 0
     FAIL = 1
 
@@ -148,6 +149,7 @@ def _load_advapi32() -> ctypes.WinDLL:
 
 class SERVICE_STATUS(ctypes.Structure):
     """Win32 SERVICE_STATUS structure."""
+
     _fields_ = [
         ("dwServiceType", ctypes.c_ulong),
         ("dwCurrentState", ctypes.c_ulong),
@@ -210,7 +212,7 @@ def check_vigembus_service(ci_mode: bool = False) -> tuple[bool, str]:
     to `sc query ViGEmBus` if ctypes SCM query fails. Guarantees that
     SCM and Service handles are closed under all exceptions and return paths.
     """
-    if ci_mode or is_headless_ci():
+    if ci_mode:
         # First check if the real driver happens to be installed
         real_ok, real_detail = _check_vigembus_service_internal()
         if real_ok:
@@ -463,10 +465,7 @@ def check_vgamepad_controller(ci_mode: bool = False) -> tuple[bool, str]:
     try:
         import vgamepad  # noqa: WPS433 — late import is intentional
     except ImportError:
-        return False, (
-            "The 'vgamepad' package is not installed.\n"
-            "  → pip install vgamepad"
-        )
+        return False, ("The 'vgamepad' package is not installed.\n  → pip install vgamepad")
 
     gamepad: vgamepad.VX360Gamepad | None = None
     try:
@@ -475,8 +474,11 @@ def check_vgamepad_controller(ci_mode: bool = False) -> tuple[bool, str]:
         gamepad.update()
         return True, "Virtual Xbox 360 controller created, reset, and updated OK."
     except Exception as exc:
-        if ci_mode or is_headless_ci():
-            return True, "vgamepad VX360Gamepad allocation skipped (headless CI environment detected)."
+        if ci_mode:
+            return (
+                True,
+                "vgamepad VX360Gamepad allocation skipped (headless CI environment detected).",
+            )
         return False, (
             f"Failed to instantiate VX360Gamepad: {exc}\n"
             "  → Ensure ViGEmBus v1.17.333+ is installed and the service is running.\n"
@@ -491,6 +493,7 @@ def check_vgamepad_controller(ci_mode: bool = False) -> tuple[bool, str]:
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
+
 def _vigembus_install_message() -> str:
     """Standard remediation text when ViGEmBus is not found."""
     return (
@@ -502,6 +505,7 @@ def _vigembus_install_message() -> str:
 
 
 # ── CLI entry point ─────────────────────────────────────────────────────
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command line arguments for driver_check."""

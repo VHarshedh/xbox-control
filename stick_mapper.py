@@ -25,14 +25,15 @@ from pathlib import Path
 # ── Module constants ─────────────────────────────────────────────────────
 
 TARGET_HZ: float = 250.0
-TARGET_DT: float = 1.0 / TARGET_HZ          # 0.004 s
+TARGET_DT: float = 1.0 / TARGET_HZ  # 0.004 s
 
 _EPSILON: float = 1e-4
-_I16_POS: int = 32_767                       #  max  int16
-_I16_NEG: int = 32_768                       # |min| int16
+_I16_POS: int = 32_767  #  max  int16
+_I16_NEG: int = 32_768  # |min| int16
 
 
 # ── Win32 high-resolution timing (Hardened DLL loading) ─────────────────
+
 
 def _get_system_directory() -> Path:
     """Resolve the true Windows System32 directory via kernel32 API (CWE-426)."""
@@ -306,9 +307,7 @@ class MouseToStickMapper:
         if not math.isfinite(curve_exponent) or curve_exponent <= 0.0:
             raise ValueError(f"curve_exponent must be > 0, got {curve_exponent}")
         if not math.isfinite(deadzone_comp) or not 0.0 <= deadzone_comp <= 0.35:
-            raise ValueError(
-                f"deadzone_comp must be in [0.0, 0.35], got {deadzone_comp}"
-            )
+            raise ValueError(f"deadzone_comp must be in [0.0, 0.35], got {deadzone_comp}")
         if not math.isfinite(decay_rate) or not 0.0 <= decay_rate <= 1.0:
             raise ValueError(f"decay_rate must be in [0.0, 1.0], got {decay_rate}")
         if not math.isfinite(max_delta_per_tick) or max_delta_per_tick <= 0.0:
@@ -322,7 +321,7 @@ class MouseToStickMapper:
         self.decay_rate: float = decay_rate
         self.max_delta_per_tick: float = max_delta_per_tick
         self.invert_y: bool = invert_y
-        self._alpha: float = 1.0 - smoothing     # EMA weight for new sample
+        self._alpha: float = 1.0 - smoothing  # EMA weight for new sample
 
         # Internal smoothed stick vector (normalised ≈ [-1, 1])
         self._sx: float = 0.0
@@ -390,7 +389,7 @@ class MouseToStickMapper:
                 # Frame-rate-independent: decay_rate is calibrated per 250 Hz tick
                 ticks = dt * TARGET_HZ if dt > 0.0 else 1.0
                 ticks = max(0.0, min(1000.0, ticks))
-                decay = self.decay_rate ** ticks
+                decay = self.decay_rate**ticks
                 if not math.isfinite(decay):
                     decay = 0.0
                 self._sx *= decay
@@ -419,7 +418,7 @@ class MouseToStickMapper:
 
         # Power curve on normalized radial magnitude [0.0, 1.0]
         r_clamped = max(0.0, min(1.0, r))
-        r_curved: float = r_clamped ** self.curve_exponent
+        r_curved: float = r_clamped**self.curve_exponent
         if not math.isfinite(r_curved):
             r_curved = 0.0
 
@@ -475,14 +474,14 @@ def _test_deadzone_jump() -> tuple[bool, str]:
         sensitivity=0.05,
         deadzone_comp=dz,
         curve_exponent=1.0,
-        smoothing=0.0,          # no EMA lag
+        smoothing=0.0,  # no EMA lag
     )
     rx, ry = m.step(1, 0, TARGET_DT)
     mag = math.hypot(rx, ry)
     # With smoothing=0.0 (alpha=1.0), one step sets _sx = 0.05
     # r_curved = 0.05, r_out = 0.20 + 0.05*0.80 = 0.24
     # expected ≈ 0.24 * 32767 ≈ 7864
-    threshold = dz * _I16_POS * 0.40   # generous margin
+    threshold = dz * _I16_POS * 0.40  # generous margin
     ok = mag >= threshold
     return ok, f"mag={mag:.0f} ≥ threshold={threshold:.0f}"
 
@@ -499,7 +498,7 @@ def _test_diagonal_normalization() -> tuple[bool, str]:
     for _ in range(30):
         rx, ry = m.step(200, 200, TARGET_DT)
     mag = math.hypot(rx, ry)
-    limit = _I16_POS * 1.001       # tiny floating-point tolerance
+    limit = _I16_POS * 1.001  # tiny floating-point tolerance
     ok = mag <= limit
     return ok, f"mag={mag:.1f} ≤ {limit:.1f}"
 
@@ -517,10 +516,7 @@ def _test_timing_accuracy() -> tuple[bool, str]:
     max_ms = max(trimmed) * 1000.0
     min_ms = min(trimmed) * 1000.0
     ok = abs(avg_ms - 4.0) < 0.5
-    return ok, (
-        f"avg={avg_ms:.3f} ms  min={min_ms:.3f} ms  max={max_ms:.3f} ms  "
-        f"(target 4.000 ms)"
-    )
+    return ok, (f"avg={avg_ms:.3f} ms  min={min_ms:.3f} ms  max={max_ms:.3f} ms  (target 4.000 ms)")
 
 
 def main() -> None:
@@ -530,10 +526,10 @@ def main() -> None:
         sys.exit(0)
 
     tests: list[tuple[str, Callable[[], tuple[bool, str]]]] = [
-        ("Zero-input recentering",  _test_recentering),
-        ("Deadzone jump",           _test_deadzone_jump),
-        ("Diagonal normalization",  _test_diagonal_normalization),
-        ("250 Hz timing accuracy",  _test_timing_accuracy),
+        ("Zero-input recentering", _test_recentering),
+        ("Deadzone jump", _test_deadzone_jump),
+        ("Diagonal normalization", _test_diagonal_normalization),
+        ("250 Hz timing accuracy", _test_timing_accuracy),
     ]
 
     print("stick_mapper.py — unit tests")

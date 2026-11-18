@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import vgamepad as vg
 
-from profiles import ProfileManager, parse_target, parse_vk
+from profiles import ProfileManager, StickConfig, parse_target, parse_vk
 
 
 class TestVKParsing:
@@ -115,8 +115,9 @@ class TestProfileSecurityAndValidation:
             symlink_file.symlink_to(dummy_file)
         except OSError:
             # On Windows without SeCreateSymbolicLinkPrivilege, mock is_symlink
-            with patch.object(Path, "is_symlink", return_value=True), pytest.raises(
-                ValueError, match="Symlinks are rejected for security"
+            with (
+                patch.object(Path, "is_symlink", return_value=True),
+                pytest.raises(ValueError, match="Symlinks are rejected for security"),
             ):
                 ProfileManager.load_profile(dummy_file)
             return
@@ -335,8 +336,9 @@ class TestProfileSecurityAndValidation:
             mock_st.st_file_attributes = getattr(real_st, "st_file_attributes", 0) | 0x0400
             return mock_st
 
-        with patch("os.fstat", side_effect=mock_fstat), pytest.raises(
-            ValueError, match="Reparse points and junctions are rejected"
+        with (
+            patch("os.fstat", side_effect=mock_fstat),
+            pytest.raises(ValueError, match="Reparse points and junctions are rejected"),
         ):
             ProfileManager.load_profile(dummy)
 
@@ -1180,3 +1182,299 @@ class TestWheelMappingAndGuideButtons:
                 mbutton=False,
             )
             mock_gamepad.release_button.assert_any_call(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
+
+
+class TestMouseStickConfig:
+    """Validate configurable mouse_stick routing (left vs right) and profile loading."""
+
+    def test_stick_config_default_mouse_stick(self) -> None:
+        cfg = StickConfig(
+            sensitivity=0.08,
+            curve_exponent=1.3,
+            deadzone_comp=0.18,
+            decay_rate=0.72,
+            smoothing_alpha=0.75,
+        )
+        assert cfg.mouse_stick == "right"
+        assert cfg.invert_y is False
+
+    def test_stick_config_direct_instantiation_validation(self) -> None:
+        cfg_left = StickConfig(0.08, 1.3, 0.18, 0.72, 0.75, False, "left")
+        assert cfg_left.mouse_stick == "left"
+
+        # Case and whitespace normalization
+        cfg_upper = StickConfig(0.08, 1.3, 0.18, 0.72, 0.75, False, "  LEFT  ")
+        assert cfg_upper.mouse_stick == "left"
+
+        with pytest.raises(ValueError, match="'mouse_stick' must be 'left' or 'right'"):
+            StickConfig(0.08, 1.3, 0.18, 0.72, 0.75, False, "invalid")
+
+        with pytest.raises(ValueError, match="'mouse_stick' must be a string"):
+            StickConfig(0.08, 1.3, 0.18, 0.72, 0.75, False, 123)  # type: ignore[arg-type]
+
+    def test_mouse_stick_left_and_right(self, tmp_path: Path) -> None:
+        for val in ("left", "right"):
+            p_file = tmp_path / f"profile_{val}.json"
+            data = {
+                "name": f"Profile {val}",
+                "stick_config": {
+                    "sensitivity": 0.05,
+                    "curve_exponent": 1.0,
+                    "deadzone_comp": 0.1,
+                    "decay_rate": 0.8,
+                    "smoothing_alpha": 0.5,
+                    "mouse_stick": val,
+                },
+                "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+                "buttons": {"MOUSE_LEFT": "XUSB_GAMEPAD_A"},
+            }
+            p_file.write_text(json.dumps(data), encoding="utf-8")
+            prof = ProfileManager.load_profile(p_file)
+            assert prof.stick_config.mouse_stick == val
+
+    def test_mouse_stick_whitespace_and_case_insensitivity(self, tmp_path: Path) -> None:
+        cases = [
+            ("  LEFT  ", "left"),
+            ("Right", "right"),
+            ("  right\t", "right"),
+            ("LeFt", "left"),
+        ]
+        for idx, (raw_val, expected) in enumerate(cases):
+            p_file = tmp_path / f"profile_{idx}_{expected}.json"
+            data = {
+                "name": f"Profile {expected}",
+                "stick_config": {
+                    "sensitivity": 0.05,
+                    "curve_exponent": 1.0,
+                    "deadzone_comp": 0.1,
+                    "decay_rate": 0.8,
+                    "smoothing_alpha": 0.5,
+                    "mouse_stick": raw_val,
+                },
+                "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+                "buttons": {"MOUSE_LEFT": "XUSB_GAMEPAD_A"},
+            }
+            p_file.write_text(json.dumps(data), encoding="utf-8")
+            prof = ProfileManager.load_profile(p_file)
+            assert prof.stick_config.mouse_stick == expected
+
+    def test_mouse_stick_default_when_omitted(self, tmp_path: Path) -> None:
+        p_file = tmp_path / "profile_default.json"
+        data = {
+            "name": "Profile Default",
+            "stick_config": {
+                "sensitivity": 0.05,
+                "curve_exponent": 1.0,
+                "deadzone_comp": 0.1,
+                "decay_rate": 0.8,
+                "smoothing_alpha": 0.5,
+            },
+            "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+            "buttons": {"MOUSE_LEFT": "XUSB_GAMEPAD_A"},
+        }
+        p_file.write_text(json.dumps(data), encoding="utf-8")
+        prof = ProfileManager.load_profile(p_file)
+        assert prof.stick_config.mouse_stick == "right"
+
+    def test_mouse_stick_invalid_value_rejected(self, tmp_path: Path) -> None:
+        invalid_values = ["middle", "center", "up", "down", "both", "", "   "]
+        for bad_val in invalid_values:
+            p_file = tmp_path / "profile_bad_val.json"
+            data = {
+                "name": "Bad Mouse Stick",
+                "stick_config": {
+                    "sensitivity": 0.05,
+                    "curve_exponent": 1.0,
+                    "deadzone_comp": 0.1,
+                    "decay_rate": 0.8,
+                    "smoothing_alpha": 0.5,
+                    "mouse_stick": bad_val,
+                },
+                "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+                "buttons": {"MOUSE_LEFT": "XUSB_GAMEPAD_A"},
+            }
+            p_file.write_text(json.dumps(data), encoding="utf-8")
+            with pytest.raises(ValueError, match="'mouse_stick' must be 'left' or 'right'"):
+                ProfileManager.load_profile(p_file)
+
+    def test_mouse_stick_non_string_rejected(self, tmp_path: Path) -> None:
+        invalid_types: list[Any] = [True, False, 1, 0, 1.5, [], {}]
+        for bad_type in invalid_types:
+            p_file = tmp_path / "profile_bad_type.json"
+            data = {
+                "name": "Bad Mouse Stick Type",
+                "stick_config": {
+                    "sensitivity": 0.05,
+                    "curve_exponent": 1.0,
+                    "deadzone_comp": 0.1,
+                    "decay_rate": 0.8,
+                    "smoothing_alpha": 0.5,
+                    "mouse_stick": bad_type,
+                },
+                "wasd_left_stick": {"up": 87, "down": 83, "left": 65, "right": 68},
+                "buttons": {"MOUSE_LEFT": "XUSB_GAMEPAD_A"},
+            }
+            p_file.write_text(json.dumps(data), encoding="utf-8")
+            with pytest.raises(ValueError, match="'mouse_stick' must be a string"):
+                ProfileManager.load_profile(p_file)
+
+    def test_rts_menu_profile_loaded_and_valid(self) -> None:
+        profiles_dir = Path(__file__).parents[1] / "profiles"
+        rts_file = profiles_dir / "rts_menu.json"
+        assert rts_file.is_file(), f"Expected {rts_file} to exist"
+
+        prof = ProfileManager.load_profile(rts_file)
+        assert prof.name == "RTS / Menu"
+        assert prof.stick_config.mouse_stick == "left"
+        assert prof.stick_config.sensitivity == 0.070
+        assert prof.stick_config.curve_exponent == 1.2
+        assert prof.stick_config.deadzone_comp == 0.15
+        assert prof.stick_config.decay_rate == 0.78
+        assert prof.stick_config.smoothing_alpha == 0.75
+        assert prof.stick_config.invert_y is False
+
+        assert prof.wasd.up == 87
+        assert prof.wasd.down == 83
+        assert prof.wasd.left == 65
+        assert prof.wasd.right == 68
+        assert prof.wasd.walk_key == 0xA4  # VK_LMENU
+
+        # Verify button mappings
+        assert prof._mouse_targets["left"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_A]
+        assert prof._mouse_targets["right"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_X]
+        assert prof._mouse_targets["middle"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_B]
+        assert prof._mouse_targets["x1"] == ["RT"]
+        assert prof._mouse_targets["x2"] == ["LT"]
+        assert prof._mouse_targets["wheel_up"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER]
+        assert prof._mouse_targets["wheel_down"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER]
+
+        assert prof._key_targets[0x20] == ["RT"]  # VK_SPACE
+        assert prof._key_targets[0xA0] == ["LT"]  # VK_LSHIFT
+        assert prof._key_targets[ord("F")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_Y]
+        assert prof._key_targets[ord("C")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_B]
+        assert prof._key_targets[ord("Q")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER]
+        assert prof._key_targets[ord("E")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER]
+        assert prof._key_targets[ord("R")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB]
+        assert prof._key_targets[ord("G")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB]
+        assert prof._key_targets[ord("1")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP]
+        assert prof._key_targets[ord("2")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT]
+        assert prof._key_targets[ord("3")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN]
+        assert prof._key_targets[ord("4")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT]
+        assert prof._key_targets[0x09] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK]  # VK_TAB
+        assert prof._key_targets[0x1B] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_START]  # VK_ESCAPE
+        assert prof._key_targets[0x24] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE]  # VK_HOME
+
+    def test_action_rpg_profile_loaded_and_valid(self) -> None:
+        profiles_dir = Path(__file__).parents[1] / "profiles"
+        rpg_file = profiles_dir / "action_rpg.json"
+        assert rpg_file.is_file(), f"Expected {rpg_file} to exist"
+
+        prof = ProfileManager.load_profile(rpg_file)
+        assert prof.name == "Action / RPG"
+        assert prof.stick_config.mouse_stick == "right"
+        assert prof.stick_config.sensitivity == 0.075
+        assert prof.stick_config.curve_exponent == 1.25
+        assert prof.stick_config.deadzone_comp == 0.16
+        assert prof.stick_config.decay_rate == 0.75
+        assert prof.stick_config.smoothing_alpha == 0.75
+        assert prof.stick_config.invert_y is False
+
+        assert prof.wasd.up == 87
+        assert prof.wasd.down == 83
+        assert prof.wasd.left == 65
+        assert prof.wasd.right == 68
+        assert prof.wasd.walk_key is None
+
+        # Verify button mappings
+        assert prof._mouse_targets["left"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER]
+        assert prof._mouse_targets["right"] == ["RT"]
+        assert prof._mouse_targets["middle"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB]
+        assert prof._mouse_targets["x1"] == ["LT"]
+        assert prof._mouse_targets["x2"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER]
+        assert prof._mouse_targets["wheel_up"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP]
+        assert prof._mouse_targets["wheel_down"] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN]
+
+        assert prof._key_targets[0x20] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_B]  # VK_SPACE
+        assert prof._key_targets[ord("F")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_A]
+        assert prof._key_targets[ord("E")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_Y]
+        assert prof._key_targets[ord("R")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_X]
+        assert prof._key_targets[0xA0] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB]  # VK_LSHIFT
+        assert prof._key_targets[ord("Q")] == ["LT"]
+        assert prof._key_targets[ord("1")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP]
+        assert prof._key_targets[ord("2")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT]
+        assert prof._key_targets[ord("3")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN]
+        assert prof._key_targets[ord("4")] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT]
+        assert prof._key_targets[0x09] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK]  # VK_TAB
+        assert prof._key_targets[0x1B] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_START]  # VK_ESCAPE
+        assert prof._key_targets[0x24] == [vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE]  # VK_HOME
+
+    def test_load_all_shipped_profiles(self) -> None:
+        profiles_dir = Path(__file__).parents[1] / "profiles"
+        mgr = ProfileManager(profiles_dir=profiles_dir, default_name="Shooter")
+        assert len(mgr.profiles) >= 3
+
+        names = {p.name for p in mgr.profiles}
+        assert "Shooter" in names
+        assert "RTS / Menu" in names
+        assert "Action / RPG" in names
+
+        for prof in mgr.profiles:
+            # Verify mapper creation and operational sanity
+            mapper = prof.stick_config.create_mapper()
+            assert mapper is not None
+            out_x, out_y = mapper.step(10, 0, 0.004)
+            assert isinstance(out_x, int)
+            assert isinstance(out_y, int)
+
+            # Verify left stick computation
+            lx, ly = prof.compute_left_stick({prof.wasd.up})
+            assert ly > 0
+
+            # Verify button application and reset
+            mock_gamepad = MagicMock()
+            prof.apply_buttons(
+                mock_gamepad,
+                keys_pressed=set(),
+                lbutton=False,
+                rbutton=False,
+                mbutton=False,
+            )
+            prof.reset_controls(mock_gamepad)
+
+    def test_profile_is_button_active(self) -> None:
+        profiles_dir = Path(__file__).parents[1] / "profiles"
+        rts_file = profiles_dir / "rts_menu.json"
+        prof = ProfileManager.load_profile(rts_file)
+
+        mock_gamepad = MagicMock()
+        # Initially no buttons active
+        assert not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+        assert not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+
+        # In RTS profile, VK_R (0x52) is mapped to LEFT_THUMB
+        prof.apply_buttons(
+            mock_gamepad,
+            keys_pressed={ord("R")},
+            lbutton=False,
+            rbutton=False,
+            mbutton=False,
+        )
+        assert prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+        assert not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+
+        # Mouse left click maps to XUSB_GAMEPAD_A
+        prof.apply_buttons(
+            mock_gamepad,
+            keys_pressed=set(),
+            lbutton=True,
+            rbutton=False,
+            mbutton=False,
+        )
+        assert prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+        # Note: LEFT_THUMB remains active across sub-frame hold ticks (MIN_BUTTON_HOLD_TICKS)
+        assert prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+
+        # reset_controls clears all active and held states
+        prof.reset_controls(mock_gamepad)
+        assert not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+        assert not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_A)

@@ -94,7 +94,10 @@ def validate_profile_name(name: str) -> tuple[bool, str]:
         return False, "Profile name contains forbidden NTFS Alternate Data Stream separator (':')."
 
     if "/" in stripped or "\\" in stripped or ".." in stripped:
-        return False, "Profile name contains forbidden path separators or traversal components ('..')."
+        return (
+            False,
+            "Profile name contains forbidden path separators or traversal components ('..').",
+        )
 
     if stripped.endswith("."):
         return False, "Profile name cannot end with a period."
@@ -108,7 +111,10 @@ def validate_profile_name(name: str) -> tuple[bool, str]:
     forbidden_chars = set('<>"/\\|?*')
     found_forbidden = forbidden_chars.intersection(stripped)
     if found_forbidden:
-        return False, f"Profile name contains forbidden characters: {' '.join(sorted(found_forbidden))}"
+        return (
+            False,
+            f"Profile name contains forbidden characters: {' '.join(sorted(found_forbidden))}",
+        )
 
     return True, ""
 
@@ -508,6 +514,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
         print("  Controls:")
         print("    [F8] Toggle Input Capture ON / OFF")
         print("    [F9] Cycle Profiles (Shooter <-> RTS / Menu)")
+        print("    [F10] Swap Mouse Stick (Right Stick <-> Left Stick)")
         print("    [Ctrl+C] Clean Exit")
         print("=" * 60)
 
@@ -537,19 +544,32 @@ def run_mapper(argv: list[str] | None = None) -> int:
         ticks_since_update = 0
         active_ticks = 0
         wakeup_ticks_remaining: int = 0
+        wakeup_button_held: bool = False
+        stick_swap_override: bool = False
 
         try:
             while not lifecycle.shutdown_event.is_set():
                 if not hooks.is_healthy:
-                    logger.error("Low-level Win32 hook subsystem terminated unexpectedly. Shutting down.")
+                    logger.error(
+                        "Low-level Win32 hook subsystem terminated unexpectedly. Shutting down."
+                    )
                     return 1
 
                 # ── Profile cycling hotkey check (F9 consumed from hook thread) ──
                 if hooks.consume_profile_cycle():
                     try:
                         wakeup_ticks_remaining = 0
+                        if wakeup_button_held:
+                            if not profile_mgr.current_profile.is_button_active(
+                                vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB
+                            ):
+                                gamepad.release_button(
+                                    button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB
+                                )
+                            wakeup_button_held = False
                         profile_mgr.current_profile.reset_controls(gamepad)
                         hooks.reset_held_inputs()
+                        stick_swap_override = False
                         active_prof = profile_mgr.cycle()
                         gamepad.reset()
                         gamepad.update()
@@ -560,6 +580,31 @@ def run_mapper(argv: list[str] | None = None) -> int:
                     except Exception as cyc_exc:
                         logger.warning("Error cycling profile: %s", cyc_exc)
 
+                # ── Stick swap hotkey check (F10 consumed from hook thread) ──
+                if hooks.consume_stick_swap() is True:
+                    try:
+                        stick_swap_override = not stick_swap_override
+                        prof = profile_mgr.current_profile
+                        effective_mouse_stick = (
+                            ("left" if prof.stick_config.mouse_stick == "right" else "right")
+                            if stick_swap_override
+                            else prof.stick_config.mouse_stick
+                        )
+                        gamepad.left_joystick(x_value=0, y_value=0)
+                        gamepad.right_joystick(x_value=0, y_value=0)
+                        gamepad.update()
+                        last_controller_state = None
+                        ticks_since_update = 0
+                        if effective_mouse_stick == "left":
+                            print("[STICK] Mouse -> Left Stick (LS)", flush=True)
+                        else:
+                            print("[STICK] Mouse -> Right Stick (RS)", flush=True)
+                        logger.debug(
+                            "Toggled stick swap: effective_mouse_stick=%s", effective_mouse_stick
+                        )
+                    except Exception as swap_exc:
+                        logger.warning("Error swapping sticks: %s", swap_exc)
+
                 active = hooks.active
 
                 # ── State transition detection ──
@@ -569,6 +614,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
                             timer.reset()
                             profile_mgr.current_profile.mapper.reset()
                             wakeup_ticks_remaining = WAKEUP_PULSE_TICKS
+                            wakeup_button_held = False
                             last_controller_state = None
                             ticks_since_update = 0
                             active_ticks = 0
@@ -576,6 +622,14 @@ def run_mapper(argv: list[str] | None = None) -> int:
                             logger.debug("Capture activated.")
                         else:
                             wakeup_ticks_remaining = 0
+                            if wakeup_button_held:
+                                if not profile_mgr.current_profile.is_button_active(
+                                    vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB
+                                ):
+                                    gamepad.release_button(
+                                        button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB
+                                    )
+                                wakeup_button_held = False
                             profile_mgr.current_profile.reset_controls(gamepad)
                             gamepad.reset()
                             gamepad.update()
@@ -602,25 +656,57 @@ def run_mapper(argv: list[str] | None = None) -> int:
 
                     prof = profile_mgr.current_profile
 
-                    # A. Right Stick: accumulate mouse deltas and apply curve
+                    # Read all inputs
                     dx, dy = hooks.consume_mouse_delta()
-                    rx, ry = prof.mapper.step(dx, dy, dt)
-                    if dx != 0 or dy != 0:
-                        wakeup_ticks_remaining = 0
-                    elif wakeup_ticks_remaining > 0:
-                        rx = WAKEUP_STICK_VALUE
-                        ry = 0
-                        wakeup_ticks_remaining -= 1
-                    gamepad.right_joystick(x_value=rx, y_value=ry)
-
-                    # B. Left Stick: WASD directional inputs with diagonal normalization
                     keys_pressed = hooks.get_keys_pressed()
-                    lx, ly = prof.compute_left_stick(keys_pressed)
-                    gamepad.left_joystick(x_value=lx, y_value=ly)
-
-                    # C. Buttons & Triggers: apply active profile mappings
                     lb, rb, mb, x1, x2 = hooks.get_mouse_buttons()
                     wheel_delta = hooks.consume_wheel_delta()
+
+                    # Cancel wakeup pulse on mouse or key activity
+                    if (
+                        dx != 0
+                        or dy != 0
+                        or keys_pressed
+                        or lb
+                        or rb
+                        or mb
+                        or x1
+                        or x2
+                        or wheel_delta != 0
+                    ):
+                        wakeup_ticks_remaining = 0
+
+                    wakeup_pulse_active = False
+                    stick_mx, stick_my = prof.mapper.step(dx, dy, dt)
+                    if wakeup_ticks_remaining > 0:
+                        stick_mx = WAKEUP_STICK_VALUE
+                        stick_my = 0
+                        wakeup_pulse_active = True
+                        wakeup_ticks_remaining -= 1
+
+                    # B. WASD stick output with diagonal normalization
+                    stick_wx, stick_wy = prof.compute_left_stick(keys_pressed)
+
+                    # Determine effective mouse stick (accounting for F10 stick swap override)
+                    effective_mouse_stick = (
+                        ("left" if prof.stick_config.mouse_stick == "right" else "right")
+                        if stick_swap_override
+                        else prof.stick_config.mouse_stick
+                    )
+
+                    # C. Route mouse and WASD outputs to joysticks based on effective mouse stick
+                    if effective_mouse_stick == "left":
+                        gamepad.left_joystick(x_value=stick_mx, y_value=stick_my)
+                        gamepad.right_joystick(x_value=stick_wx, y_value=stick_wy)
+                        rx, ry = stick_wx, stick_wy
+                        lx, ly = stick_mx, stick_my
+                    else:
+                        gamepad.right_joystick(x_value=stick_mx, y_value=stick_my)
+                        gamepad.left_joystick(x_value=stick_wx, y_value=stick_wy)
+                        rx, ry = stick_mx, stick_my
+                        lx, ly = stick_wx, stick_wy
+
+                    # D. Buttons & Triggers: apply active profile mappings
                     prof.apply_buttons(
                         gamepad=gamepad,
                         keys_pressed=keys_pressed,
@@ -632,7 +718,16 @@ def run_mapper(argv: list[str] | None = None) -> int:
                         wheel_delta=wheel_delta,
                     )
 
-                    # D. Commit report to ViGEmBus if state changed or heartbeat reached
+                    # Chromium GamepadProvider button user-gesture wakeup (L3 pulse on F8)
+                    if wakeup_pulse_active:
+                        gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                        wakeup_button_held = True
+                    elif wakeup_button_held:
+                        if not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB):
+                            gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                        wakeup_button_held = False
+
+                    # E. Commit report to ViGEmBus if state changed or heartbeat reached
                     rep = getattr(gamepad, "report", None)
                     if rep is not None and isinstance(getattr(rep, "sThumbRX", None), (int, float)):
                         current_state = (
@@ -663,7 +758,9 @@ def run_mapper(argv: list[str] | None = None) -> int:
                     # Issue 2: ViGEmBus Hot-Reconnect on Sleep/Wake
                     if consecutive_tick_errors == 10:
                         try:
-                            logger.info("Attempting ViGEmBus controller hot-reconnect at 10 consecutive tick errors.")
+                            logger.info(
+                                "Attempting ViGEmBus controller hot-reconnect at 10 consecutive tick errors."
+                            )
                             # Release old controller first so XInput Slot 0 is freed
                             old_pad = lifecycle.gamepad or gamepad
                             if old_pad is not None:

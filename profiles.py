@@ -154,29 +154,31 @@ _RESERVED_DEVICE_NAMES: frozenset[str] = frozenset(
     | {f"LPT{i}" for i in range(0, 10)}
 )
 
-_UNSUPPORTED_CONTROLLER_TOKENS: frozenset[str] = frozenset({
-    "CROSS",
-    "CIRCLE",
-    "TRIANGLE",
-    "SQUARE",
-    "L1",
-    "R1",
-    "L2",
-    "R2",
-    "SHARE",
-    "OPTIONS",
-    "TOUCHPAD",
-    "DS4_BUTTON_CROSS",
-    "DS4_BUTTON_CIRCLE",
-    "DS4_BUTTON_TRIANGLE",
-    "DS4_BUTTON_SQUARE",
-    "DS4_BUTTON_SHOULDER_LEFT",
-    "DS4_BUTTON_SHOULDER_RIGHT",
-    "DS4_BUTTON_TRIGGER_LEFT",
-    "DS4_BUTTON_TRIGGER_RIGHT",
-    "DS4_BUTTON_SHARE",
-    "DS4_BUTTON_OPTIONS",
-})
+_UNSUPPORTED_CONTROLLER_TOKENS: frozenset[str] = frozenset(
+    {
+        "CROSS",
+        "CIRCLE",
+        "TRIANGLE",
+        "SQUARE",
+        "L1",
+        "R1",
+        "L2",
+        "R2",
+        "SHARE",
+        "OPTIONS",
+        "TOUCHPAD",
+        "DS4_BUTTON_CROSS",
+        "DS4_BUTTON_CIRCLE",
+        "DS4_BUTTON_TRIANGLE",
+        "DS4_BUTTON_SQUARE",
+        "DS4_BUTTON_SHOULDER_LEFT",
+        "DS4_BUTTON_SHOULDER_RIGHT",
+        "DS4_BUTTON_TRIGGER_LEFT",
+        "DS4_BUTTON_TRIGGER_RIGHT",
+        "DS4_BUTTON_SHARE",
+        "DS4_BUTTON_OPTIONS",
+    }
+)
 
 INV_SQRT2: float = 1.0 / math.sqrt(2.0)
 
@@ -201,6 +203,7 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 # ── Parsing Helpers ──────────────────────────────────────────────────────
+
 
 def parse_vk(val: int | str) -> int:
     """Resolve a virtual-key identifier (integer or name string) to a VK code."""
@@ -331,7 +334,9 @@ def validate_profile_path(path: Path, base_dir: Path | None = None) -> Path:
     else:
         res_remainder = resolved_str
     if ":" in res_remainder:
-        raise ValueError(f"NTFS Alternate Data Streams (colon in path) are rejected: {resolved_path}")
+        raise ValueError(
+            f"NTFS Alternate Data Streams (colon in path) are rejected: {resolved_path}"
+        )
 
     for part in resolved_path.parts:
         p_clean = part
@@ -377,15 +382,28 @@ def validate_profile_path(path: Path, base_dir: Path | None = None) -> Path:
 
 # ── Data Classes ─────────────────────────────────────────────────────────
 
+
 @dataclass(frozen=True, slots=True)
 class StickConfig:
-    """Right stick response and smoothing settings."""
+    """Stick response, smoothing, and physical mouse routing settings."""
+
     sensitivity: float
     curve_exponent: float
     deadzone_comp: float
     decay_rate: float
     smoothing_alpha: float
     invert_y: bool = False
+    mouse_stick: str = "right"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mouse_stick, str):
+            raise ValueError(
+                f"'mouse_stick' must be a string ('left' or 'right'), got {type(self.mouse_stick).__name__}."
+            )
+        clean = self.mouse_stick.strip().lower()
+        if clean not in ("left", "right"):
+            raise ValueError(f"'mouse_stick' must be 'left' or 'right', got {self.mouse_stick!r}.")
+        object.__setattr__(self, "mouse_stick", clean)
 
     def create_mapper(self) -> MouseToStickMapper:
         """Instantiate a configured MouseToStickMapper."""
@@ -402,6 +420,7 @@ class StickConfig:
 @dataclass(frozen=True, slots=True)
 class WASDConfig:
     """Virtual-key codes for directional movement on Left Stick."""
+
     up: int
     down: int
     left: int
@@ -410,6 +429,7 @@ class WASDConfig:
 
 
 # ── Profile ──────────────────────────────────────────────────────────────
+
 
 class Profile:
     """A fully validated controller profile."""
@@ -549,8 +569,12 @@ class Profile:
 
         if wx != 0 and wy != 0:
             # Diagonal input: normalize to unit circle so magnitude <= 1.0
-            lx = int(wx * 32767 * INV_SQRT2 + 0.5) if wx > 0 else -int(-wx * 32768 * INV_SQRT2 + 0.5)
-            ly = int(wy * 32767 * INV_SQRT2 + 0.5) if wy > 0 else -int(-wy * 32768 * INV_SQRT2 + 0.5)
+            lx = (
+                int(wx * 32767 * INV_SQRT2 + 0.5) if wx > 0 else -int(-wx * 32768 * INV_SQRT2 + 0.5)
+            )
+            ly = (
+                int(wy * 32767 * INV_SQRT2 + 0.5) if wy > 0 else -int(-wy * 32768 * INV_SQRT2 + 0.5)
+            )
         else:
             lx = 32767 if wx > 0 else (-32768 if wx < 0 else 0)
             ly = 32767 if wy > 0 else (-32768 if wy < 0 else 0)
@@ -722,8 +746,13 @@ class Profile:
         self._active_physical_or_held.clear()
         self.mapper.reset()
 
+    def is_button_active(self, button: vg.XUSB_BUTTON) -> bool:
+        """Return True if the specified button is currently active or held."""
+        return button in self._active_buttons
+
 
 # ── Profile Manager ──────────────────────────────────────────────────────
+
 
 class ProfileManager:
     """Discovers, validates, and cycles JSON controller profiles at runtime."""
@@ -867,9 +896,7 @@ class ProfileManager:
         try:
             raw_text = raw_bytes.decode("utf-8")
         except UnicodeDecodeError as err:
-            raise ValueError(
-                f"Profile file {resolved_path} is not valid UTF-8: {err}"
-            ) from err
+            raise ValueError(f"Profile file {resolved_path} is not valid UTF-8: {err}") from err
 
         # Parse JSON rejecting duplicate keys and non-finite constants
         try:
@@ -903,17 +930,33 @@ class ProfileManager:
         if not isinstance(raw_stick, dict):
             raise ValueError(f"Profile {resolved_path} missing 'stick_config' object.")
 
-        allowed_stick_keys = {"sensitivity", "curve_exponent", "deadzone_comp", "decay_rate", "smoothing_alpha", "invert_y"}
+        allowed_stick_keys = {
+            "sensitivity",
+            "curve_exponent",
+            "deadzone_comp",
+            "decay_rate",
+            "smoothing_alpha",
+            "invert_y",
+            "mouse_stick",
+        }
         unexpected_stick = set(raw_stick.keys()) - allowed_stick_keys
         if unexpected_stick:
             raise ValueError(
                 f"Profile {resolved_path}: Unexpected key(s) in 'stick_config': {sorted(unexpected_stick)}"
             )
 
-        required_stick_keys = ("sensitivity", "curve_exponent", "deadzone_comp", "decay_rate", "smoothing_alpha")
+        required_stick_keys = (
+            "sensitivity",
+            "curve_exponent",
+            "deadzone_comp",
+            "decay_rate",
+            "smoothing_alpha",
+        )
         for k in required_stick_keys:
             if k not in raw_stick:
-                raise ValueError(f"Profile {resolved_path}: Missing required parameter in 'stick_config': '{k}'.")
+                raise ValueError(
+                    f"Profile {resolved_path}: Missing required parameter in 'stick_config': '{k}'."
+                )
             val = raw_stick[k]
             if isinstance(val, bool) or not isinstance(val, (int, float)):
                 raise ValueError(
@@ -941,6 +984,21 @@ class ProfileManager:
         else:
             invert_y = False
 
+        if "mouse_stick" in raw_stick:
+            raw_ms = raw_stick["mouse_stick"]
+            if not isinstance(raw_ms, str):
+                raise ValueError(
+                    f"Profile {resolved_path}: 'mouse_stick' must be a string ('left' or 'right'), got {type(raw_ms).__name__}."
+                )
+            clean_ms = raw_ms.strip().lower()
+            if clean_ms not in ("left", "right"):
+                raise ValueError(
+                    f"Profile {resolved_path}: 'mouse_stick' must be 'left' or 'right', got {raw_ms!r}."
+                )
+            mouse_stick = clean_ms
+        else:
+            mouse_stick = "right"
+
         if sensitivity <= 0 or sensitivity > 100.0:
             raise ValueError(f"Profile {path}: sensitivity must be > 0 and <= 100.0.")
         if curve_exponent <= 0 or curve_exponent > 10.0:
@@ -959,6 +1017,7 @@ class ProfileManager:
             decay_rate=decay_rate,
             smoothing_alpha=smoothing_alpha,
             invert_y=invert_y,
+            mouse_stick=mouse_stick,
         )
 
         # ── WASD left stick config ──
@@ -975,7 +1034,9 @@ class ProfileManager:
 
         for dir_key in ("up", "down", "left", "right"):
             if dir_key not in raw_wasd:
-                raise ValueError(f"Profile {path}: Missing required direction '{dir_key}' in 'wasd_left_stick'.")
+                raise ValueError(
+                    f"Profile {path}: Missing required direction '{dir_key}' in 'wasd_left_stick'."
+                )
 
         try:
             up_vk = parse_vk(raw_wasd["up"])
@@ -1020,6 +1081,7 @@ class ProfileManager:
 
 # ── Self-test ────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     """Unit test for profile loading, validation, left-stick WASD, and cycling."""
     profiles_dir = Path(__file__).parent / "profiles"
@@ -1028,7 +1090,9 @@ def main() -> None:
 
     mgr = ProfileManager(profiles_dir=profiles_dir, default_name="Shooter")
     print(f"Loaded {len(mgr.profiles)} profiles: {[p.name for p in mgr.profiles]}")
-    assert mgr.current_profile.name == "Shooter", f"Expected Shooter default, got {mgr.current_profile.name}"
+    assert mgr.current_profile.name == "Shooter", (
+        f"Expected Shooter default, got {mgr.current_profile.name}"
+    )
 
     # Test WASD diagonal normalization
     prof = mgr.current_profile

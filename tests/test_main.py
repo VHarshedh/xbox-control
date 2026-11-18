@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import vgamepad as vg
 
 import main
 from main import (
@@ -114,7 +115,7 @@ class TestProfileNameValidation:
             assert "reserved Windows device name" in reason
 
     def test_forbidden_filename_characters_rejected(self) -> None:
-        cases = ['profile<1>', 'test"quote"', 'wild*card', 'pipe|name', 'what?']
+        cases = ["profile<1>", 'test"quote"', "wild*card", "pipe|name", "what?"]
         for c in cases:
             ok, reason = validate_profile_name(c)
             assert ok is False
@@ -184,7 +185,9 @@ class TestListProfilesAndExecutionCLI:
         assert "Available controller profiles:" in captured.out
         assert "Shooter" in captured.out
 
-    def test_nonexistent_profile_handled_gracefully(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_nonexistent_profile_handled_gracefully(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         code = run_mapper(["--profile", "NonExistentProfile123"])
         assert code == 1
         captured = capsys.readouterr()
@@ -192,13 +195,17 @@ class TestListProfilesAndExecutionCLI:
         assert "not found" in captured.err
         assert "Available profiles:" in captured.err
 
-    def test_malicious_traversal_profile_handled_gracefully(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_malicious_traversal_profile_handled_gracefully(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         code = run_mapper(["--profile", "../malicious"])
         assert code == 1
         captured = capsys.readouterr()
         assert "[FAIL] Invalid profile name:" in captured.err
 
-    def test_reserved_device_profile_handled_gracefully(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_reserved_device_profile_handled_gracefully(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         code = run_mapper(["--profile", "CON.json"])
         assert code == 1
         captured = capsys.readouterr()
@@ -364,9 +371,12 @@ class TestMainLoopExceptionResilience:
             mock_verify.assert_called_once_with(ci_mode=True)
 
     def test_profile_selection_normalized_matching(self) -> None:
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ), patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer"):
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad"),
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer"),
+        ):
             instance = mock_hooks.return_value
             instance.active = False
             instance.consume_profile_cycle.return_value = False
@@ -378,9 +388,12 @@ class TestMainLoopExceptionResilience:
                 assert ret == 0
 
     def test_main_loop_detects_unhealthy_hook_subsystem(self) -> None:
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ), patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer"):
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad"),
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer"),
+        ):
             instance = mock_hooks.return_value
             instance.active = True
             instance.consume_profile_cycle.return_value = False
@@ -391,11 +404,13 @@ class TestMainLoopExceptionResilience:
             assert ret == 1
 
     def test_verify_system_requirements_check_controller_flag(self) -> None:
-        with patch("main.check_python_version", return_value=(True, "")), patch(
-            "main.check_architecture", return_value=(True, "")
-        ), patch("main.check_windows_os", return_value=(True, "")), patch(
-            "main.check_vigembus_service", return_value=(True, "")
-        ), patch("main.check_vgamepad_controller") as mock_check_ctrl:
+        with (
+            patch("main.check_python_version", return_value=(True, "")),
+            patch("main.check_architecture", return_value=(True, "")),
+            patch("main.check_windows_os", return_value=(True, "")),
+            patch("main.check_vigembus_service", return_value=(True, "")),
+            patch("main.check_vgamepad_controller") as mock_check_ctrl,
+        ):
             # check_controller=False should skip check_vgamepad_controller
             ok = main.verify_system_requirements(ci_mode=True, check_controller=False)
             assert ok is True
@@ -408,9 +423,12 @@ class TestMainLoopExceptionResilience:
             mock_check_ctrl.assert_called_once_with(ci_mode=True)
 
     def test_run_mapper_skips_controller_check_on_startup(self) -> None:
-        with patch("main.verify_system_requirements", return_value=True) as mock_verify, patch(
-            "vgamepad.VX360Gamepad"
-        ), patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer"):
+        with (
+            patch("main.verify_system_requirements", return_value=True) as mock_verify,
+            patch("vgamepad.VX360Gamepad"),
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer"),
+        ):
             instance = mock_hooks.return_value
             instance.active = False
             instance.consume_profile_cycle.return_value = False
@@ -420,18 +438,21 @@ class TestMainLoopExceptionResilience:
                 run_mapper([])
 
             # Verify that verify_system_requirements was called with check_controller=False
-            mock_verify.assert_called_once_with(ci_mode=mock_verify.call_args.kwargs.get("ci_mode"), check_controller=False)
+            mock_verify.assert_called_once_with(
+                ci_mode=mock_verify.call_args.kwargs.get("ci_mode"), check_controller=False
+            )
 
     def test_wakeup_pulse_on_f8_activation(self) -> None:
         """Verify 40ms 10-tick Chromium wakeup pulse on F8 activation and immediate cancellation on mouse move."""
         # 1. On F8 activation with dx=0, dy=0:
         # right_joystick(x_value=12000, y_value=0) sent for WAKEUP_PULSE_TICKS (10 ticks)
         # then returns to (0, 0) on the 11th tick.
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
-        ) as mock_timer:
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
             hooks_inst.active = True
@@ -464,7 +485,7 @@ class TestMainLoopExceptionResilience:
             # Ticks 1 to WAKEUP_PULSE_TICKS (first 10 ticks) must be overridden with WAKEUP_STICK_VALUE
             for i in range(WAKEUP_PULSE_TICKS):
                 assert rj_calls[i] == ((), {"x_value": WAKEUP_STICK_VALUE, "y_value": 0}), (
-                    f"Tick {i+1} expected WAKEUP_STICK_VALUE ({WAKEUP_STICK_VALUE}), got {rj_calls[i]}"
+                    f"Tick {i + 1} expected WAKEUP_STICK_VALUE ({WAKEUP_STICK_VALUE}), got {rj_calls[i]}"
                 )
 
             # Tick 11 (next tick) must restore naturally to (0, 0)
@@ -477,11 +498,12 @@ class TestMainLoopExceptionResilience:
             assert pad_instance.update.call_count == 4
 
         # 2. Moving the mouse horizontally (dx != 0) immediately cancels any remaining wakeup ticks
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
-        ) as mock_timer:
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
             hooks_inst.active = True
@@ -520,11 +542,12 @@ class TestMainLoopExceptionResilience:
             )
 
         # 3. Moving the mouse vertically (dy != 0) immediately cancels any remaining wakeup ticks
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
-        ) as mock_timer:
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
             hooks_inst.active = True
@@ -537,7 +560,9 @@ class TestMainLoopExceptionResilience:
 
             # Return (0, 0) on tick 1, then (0, 25) on tick 2
             deltas_y = [(0, 0), (0, 25), (0, 0), (0, 0)]
-            hooks_inst.consume_mouse_delta.side_effect = lambda: deltas_y.pop(0) if deltas_y else (0, 0)
+            hooks_inst.consume_mouse_delta.side_effect = lambda: (
+                deltas_y.pop(0) if deltas_y else (0, 0)
+            )
 
             timer_inst = mock_timer.return_value
             tick_count = 0
@@ -563,11 +588,12 @@ class TestMainLoopExceptionResilience:
             )
 
         # 4. Moving the mouse on tick 1 immediately cancels wakeup before any pulse is sent
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
-        ) as mock_timer:
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
             hooks_inst.active = True
@@ -580,8 +606,8 @@ class TestMainLoopExceptionResilience:
 
             # Moving mouse immediately on tick 1
             deltas_immediate = [(15, 0), (0, 0), (0, 0)]
-            hooks_inst.consume_mouse_delta.side_effect = (
-                lambda: deltas_immediate.pop(0) if deltas_immediate else (0, 0)
+            hooks_inst.consume_mouse_delta.side_effect = lambda: (
+                deltas_immediate.pop(0) if deltas_immediate else (0, 0)
             )
 
             timer_inst = mock_timer.return_value
@@ -608,9 +634,12 @@ class TestMainLoopExceptionResilience:
             )
 
     def test_hot_reconnect_at_ten_consecutive_tick_errors(self) -> None:
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer") as mock_timer:
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
             mock_hooks_inst = mock_hooks.return_value
             mock_hooks_inst.active = True
             mock_hooks_inst.is_healthy = True
@@ -637,9 +666,12 @@ class TestMainLoopExceptionResilience:
 
     def test_hot_reconnect_instantiation_failure_resilience(self) -> None:
         """When VX360Gamepad fails during hot-reconnect, gamepad remains bound and does not raise UnboundLocalError."""
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer") as mock_timer:
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
             mock_hooks_inst = mock_hooks.return_value
             mock_hooks_inst.active = True
             mock_hooks_inst.is_healthy = True
@@ -672,10 +704,11 @@ class TestMainLoopExceptionResilience:
         self, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
     ) -> None:
         """Verify ViGEmBus register_notification warns if assigned to Player 2 (led_number == 1)."""
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer"),
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
@@ -699,7 +732,9 @@ class TestMainLoopExceptionResilience:
 
             # Verify logger.warning was called
             assert any(
-                "Slot 1" in rec.message and "Player 2" in rec.message and "xbox.com/play" in rec.message
+                "Slot 1" in rec.message
+                and "Player 2" in rec.message
+                and "xbox.com/play" in rec.message
                 for rec in caplog.records
             )
 
@@ -719,10 +754,11 @@ class TestMainLoopExceptionResilience:
         self, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
     ) -> None:
         """Verify ViGEmBus register_notification does not warn when assigned to Player 1 (led_number == 0)."""
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer"),
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
@@ -762,11 +798,12 @@ class TestMainLoopExceptionResilience:
 
     def test_wakeup_cancelled_on_f9_profile_switch(self) -> None:
         """Verify that F9 profile cycling immediately resets wakeup_ticks_remaining."""
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
-        ) as mock_timer:
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
             hooks_inst.active = True
@@ -779,7 +816,9 @@ class TestMainLoopExceptionResilience:
 
             # Trigger F9 profile cycle on tick 2
             f9_cycles = [False, True, False, False]
-            hooks_inst.consume_profile_cycle.side_effect = lambda: f9_cycles.pop(0) if f9_cycles else False
+            hooks_inst.consume_profile_cycle.side_effect = lambda: (
+                f9_cycles.pop(0) if f9_cycles else False
+            )
 
             timer_inst = mock_timer.return_value
             tick_count = 0
@@ -806,13 +845,16 @@ class TestMainLoopExceptionResilience:
 
     def test_register_notification_exception_suppression(self) -> None:
         """Verify that register_notification raising an exception does not abort run_mapper."""
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer"),
         ):
             pad_instance = mock_pad_cls.return_value
-            pad_instance.register_notification.side_effect = RuntimeError("Driver notification unsupported")
+            pad_instance.register_notification.side_effect = RuntimeError(
+                "Driver notification unsupported"
+            )
             hooks_inst = mock_hooks.return_value
             hooks_inst.active = False
             hooks_inst.is_healthy = True
@@ -826,7 +868,9 @@ class TestMainLoopExceptionResilience:
         """Verify that an exception in unregister_notification does not break cleanup."""
         lifecycle = AppLifecycle()
         mock_gamepad = MagicMock()
-        mock_gamepad.unregister_notification.side_effect = RuntimeError("Failed to unregister notification")
+        mock_gamepad.unregister_notification.side_effect = RuntimeError(
+            "Failed to unregister notification"
+        )
         lifecycle.gamepad = mock_gamepad
 
         lifecycle.cleanup()
@@ -837,11 +881,12 @@ class TestMainLoopExceptionResilience:
 
     def test_wakeup_cancelled_on_deactivation_and_restarts_on_reactivation(self) -> None:
         """Verify wakeup pulse cancels on F8 deactivation and restarts on next F8 activation."""
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
-        ) as mock_timer:
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
             hooks_inst.consume_profile_cycle.return_value = False
@@ -883,10 +928,11 @@ class TestMainLoopExceptionResilience:
         self, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
     ) -> None:
         """Verify warning is handled correctly if ViGEmBus calls callback synchronously during register_notification."""
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer"),
         ):
             pad_instance = mock_pad_cls.return_value
 
@@ -901,14 +947,17 @@ class TestMainLoopExceptionResilience:
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
 
-            with caplog.at_level(logging.WARNING, logger="vg_mapper"), patch(
-                "time.sleep", side_effect=KeyboardInterrupt
+            with (
+                caplog.at_level(logging.WARNING, logger="vg_mapper"),
+                patch("time.sleep", side_effect=KeyboardInterrupt),
             ):
                 run_mapper([])
 
             # Verify logger.warning was called
             assert any(
-                "Slot 1" in rec.message and "Player 2" in rec.message and "xbox.com/play" in rec.message
+                "Slot 1" in rec.message
+                and "Player 2" in rec.message
+                and "xbox.com/play" in rec.message
                 for rec in caplog.records
             )
 
@@ -922,10 +971,11 @@ class TestMainLoopExceptionResilience:
         self, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
     ) -> None:
         """Verify ViGEmBus register_notification warns properly for Slot 2 (Player 3) and Slot 3 (Player 4)."""
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch(
-            "main.HighResTimer"
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer"),
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
@@ -945,16 +995,21 @@ class TestMainLoopExceptionResilience:
             with caplog.at_level(logging.WARNING, logger="vg_mapper"):
                 callback(None, None, 0, 0, 2, None)
 
-            assert any("Slot 2" in rec.message and "Player 3" in rec.message for rec in caplog.records)
+            assert any(
+                "Slot 2" in rec.message and "Player 3" in rec.message for rec in caplog.records
+            )
             captured = capsys.readouterr()
             assert "Slot 2" in captured.out
             assert "Player 3" in captured.out
 
     def test_hot_reconnect_unregisters_old_controller_before_allocating(self) -> None:
         """Verify that hot-reconnect cleans up the old controller before creating the new one."""
-        with patch("main.verify_system_requirements", return_value=True), patch(
-            "vgamepad.VX360Gamepad"
-        ) as mock_pad_cls, patch("main.InputHookManager") as mock_hooks, patch("main.HighResTimer") as mock_timer:
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
             mock_hooks_inst = mock_hooks.return_value
             mock_hooks_inst.active = True
             mock_hooks_inst.is_healthy = True
@@ -985,3 +1040,745 @@ class TestMainLoopExceptionResilience:
             init_pad.reset.assert_called()
             # New gamepad must have had register_notification called
             reconnect_pad.register_notification.assert_called_once()
+
+
+class TestMouseStickRouting:
+    """Verify routing of physical mouse and WASD keys to joysticks based on mouse_stick configuration."""
+
+    def test_mouse_stick_left_routes_mouse_to_left_and_wasd_to_right(self) -> None:
+        """When mouse_stick is 'left' (e.g. RTS / Menu), mouse -> left stick and WASD -> right stick."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (50, 0)
+            hooks_inst.get_keys_pressed.return_value = {87}  # 'W' key (Up)
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 1:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "rts_menu"])
+                assert ret == 0
+
+            # Mouse output must go to left joystick
+            lj_calls = pad_instance.left_joystick.call_args_list
+            assert len(lj_calls) >= 1
+            first_lj_call = lj_calls[0]
+            assert first_lj_call[1]["x_value"] > 0
+            assert first_lj_call[1]["y_value"] == 0
+
+            # WASD output (W = Up) must go to right joystick
+            rj_calls = pad_instance.right_joystick.call_args_list
+            assert len(rj_calls) >= 1
+            first_rj_call = rj_calls[0]
+            assert first_rj_call[1]["x_value"] == 0
+            assert first_rj_call[1]["y_value"] == 32767
+
+    def test_mouse_stick_right_routes_mouse_to_right_and_wasd_to_left(self) -> None:
+        """When mouse_stick is 'right' (default / Shooter), mouse -> right stick and WASD -> left stick."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (50, 0)
+            hooks_inst.get_keys_pressed.return_value = {87}  # 'W' key (Up)
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 1:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "Shooter"])
+                assert ret == 0
+                assert pad_instance.reset.called
+
+            # Mouse output must go to right joystick
+            rj_calls = pad_instance.right_joystick.call_args_list
+            assert len(rj_calls) >= 1
+            first_rj_call = rj_calls[0]
+            assert first_rj_call[1]["x_value"] > 0
+            assert first_rj_call[1]["y_value"] == 0
+
+            # WASD output (W = Up) must go to left joystick
+            lj_calls = pad_instance.left_joystick.call_args_list
+            assert len(lj_calls) >= 1
+            first_lj_call = lj_calls[0]
+            assert first_lj_call[1]["x_value"] == 0
+            assert first_lj_call[1]["y_value"] == 32767
+
+    def test_wakeup_pulse_routes_to_left_joystick_when_mouse_stick_is_left(self) -> None:
+        """Wakeup pulse must route to left_joystick when mouse_stick == 'left'."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (0, 0)
+            hooks_inst.get_keys_pressed.return_value = set()
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 1:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "rts_menu"])
+                assert ret == 0
+
+            # Left stick must receive wakeup pulse
+            lj_calls = pad_instance.left_joystick.call_args_list
+            assert len(lj_calls) >= 1
+            assert lj_calls[0] == ((), {"x_value": WAKEUP_STICK_VALUE, "y_value": 0})
+
+            # Right stick (WASD) must be neutral
+            rj_calls = pad_instance.right_joystick.call_args_list
+            assert len(rj_calls) >= 1
+            assert rj_calls[0] == ((), {"x_value": 0, "y_value": 0})
+
+    def test_wakeup_pulse_routes_to_right_joystick_when_mouse_stick_is_right(self) -> None:
+        """Wakeup pulse must route to right_joystick when mouse_stick == 'right'."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (0, 0)
+            hooks_inst.get_keys_pressed.return_value = set()
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 1:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "Shooter"])
+                assert ret == 0
+                assert pad_instance.reset.called
+
+            # Right stick must receive wakeup pulse
+            rj_calls = pad_instance.right_joystick.call_args_list
+            assert len(rj_calls) >= 1
+            assert rj_calls[0] == ((), {"x_value": WAKEUP_STICK_VALUE, "y_value": 0})
+
+            # Left stick (WASD) must be neutral
+            lj_calls = pad_instance.left_joystick.call_args_list
+            assert len(lj_calls) >= 1
+            assert lj_calls[0] == ((), {"x_value": 0, "y_value": 0})
+
+    def test_rts_menu_profile_routes_mouse_to_left_and_wasd_to_right(self) -> None:
+        """Verify RTS / Menu profile (--profile rts_menu) routes mouse to left stick and WASD to right stick."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (40, -20)
+            hooks_inst.get_keys_pressed.return_value = {68}  # 'D' key (Right)
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 1:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "rts_menu"])
+                assert ret == 0
+
+            # Mouse output must go to left joystick (dy=-20 inverted -> positive stick Y)
+            lj_calls = pad_instance.left_joystick.call_args_list
+            assert len(lj_calls) >= 1
+            assert lj_calls[0][1]["x_value"] > 0
+            assert lj_calls[0][1]["y_value"] > 0
+
+            # WASD output (D = Right) must go to right joystick
+            rj_calls = pad_instance.right_joystick.call_args_list
+            assert len(rj_calls) >= 1
+            assert rj_calls[0][1]["x_value"] == 32767
+            assert rj_calls[0][1]["y_value"] == 0
+
+    def test_rts_walk_key_halves_wasd_on_right_joystick(self) -> None:
+        """In RTS / Menu, walk key (VK_LMENU = 0xA4) halves the camera pan speed on right_joystick."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (0, 0)
+            # W key (87) + Left Alt walk key (0xA4)
+            hooks_inst.get_keys_pressed.return_value = {87, 0xA4}
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 1:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "rts_menu"])
+                assert ret == 0
+
+            # Right stick (WASD) must have halved magnitude (32767 // 2 = 16383)
+            rj_calls = pad_instance.right_joystick.call_args_list
+            assert len(rj_calls) >= 1
+            assert rj_calls[0][1]["x_value"] == 0
+            assert rj_calls[0][1]["y_value"] == 16383
+
+    def test_runtime_profile_cycling_dynamically_switches_joystick_routing(self) -> None:
+        """Switching profile at runtime via F9 swaps joystick routing from right to left stick."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (50, 0)
+            hooks_inst.get_keys_pressed.return_value = {87}  # 'W' key
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            # Tick 1: Action / RPG (mouse -> right stick, wasd -> left stick)
+            # Tick 2: F9 cycle consumes True -> switches to RTS / Menu
+            # Tick 3: RTS / Menu (mouse -> left stick, wasd -> right stick)
+            cycle_events = [False, True, False]
+
+            def fake_cycle() -> bool:
+                if cycle_events:
+                    return cycle_events.pop(0)
+                return False
+
+            hooks_inst.consume_profile_cycle.side_effect = fake_cycle
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 2:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                # Start with Action / RPG profile
+                ret = run_mapper(["--profile", "action_rpg"])
+                assert ret == 0
+
+            lj_calls = pad_instance.left_joystick.call_args_list
+            rj_calls = pad_instance.right_joystick.call_args_list
+            assert len(lj_calls) >= 2
+            assert len(rj_calls) >= 2
+
+            # Tick 1 (Action / RPG): mouse -> right stick, wasd -> left stick
+            assert rj_calls[0][1]["x_value"] > 0
+            assert lj_calls[0][1]["y_value"] == 32767
+
+            # Tick 2 (RTS / Menu after cycle): mouse -> left stick, wasd -> right stick
+            assert lj_calls[1][1]["x_value"] > 0
+            assert rj_calls[1][1]["y_value"] == 32767
+
+    def test_wakeup_pulse_left_thumb_press_and_release(self) -> None:
+        """Verify XUSB_GAMEPAD_LEFT_THUMB is pressed during 10-tick wakeup pulse and released when it ends."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_mouse_delta.return_value = (0, 0)
+            hooks_inst.get_keys_pressed.return_value = set()
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+            hooks_inst.check_foreground_window.return_value = True
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > WAKEUP_PULSE_TICKS + 1:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper([])
+                assert ret == 0
+
+            # Verify LEFT_THUMB pressed during the 10 wakeup ticks
+            press_calls = [
+                c
+                for c in pad_instance.press_button.call_args_list
+                if c == ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB})
+            ]
+            assert len(press_calls) == WAKEUP_PULSE_TICKS
+
+            # Verify LEFT_THUMB released when wakeup ticks transition to 0 (tick 11)
+            release_calls = [
+                c
+                for c in pad_instance.release_button.call_args_list
+                if c == ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB})
+            ]
+            assert len(release_calls) >= 1
+
+    def test_wakeup_pulse_left_thumb_cancelled_by_mouse_move(self) -> None:
+        """Moving the mouse during wakeup pulse immediately cancels pulse and releases LEFT_THUMB."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.consume_stick_swap.return_value = False
+            hooks_inst.get_keys_pressed.return_value = set()
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+            hooks_inst.check_foreground_window.return_value = True
+
+            # Tick 1: (0, 0) -> wakeup pulse fires, press_button called
+            # Tick 2: (25, 0) -> mouse move cancels wakeup pulse, release_button called
+            # Tick 3: (0, 0) -> wakeup cancelled, remains released
+            deltas = [(0, 0), (25, 0), (0, 0)]
+            hooks_inst.consume_mouse_delta.side_effect = lambda: deltas.pop(0) if deltas else (0, 0)
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 3:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "Shooter"])
+                assert ret == 0
+
+            press_calls = [
+                c
+                for c in pad_instance.press_button.call_args_list
+                if c == ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB})
+            ]
+            assert len(press_calls) == 1  # Only tick 1 had pulse active
+
+            release_calls = [
+                c
+                for c in pad_instance.release_button.call_args_list
+                if c == ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB})
+            ]
+            assert len(release_calls) >= 1
+
+    def test_wakeup_pulse_left_thumb_held_if_physically_pressed_in_profile(self) -> None:
+        """When a physical input mapped to LEFT_THUMB is pressed, button is not released on wakeup cancellation."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.consume_stick_swap.return_value = False
+            hooks_inst.consume_mouse_delta.return_value = (0, 0)
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+            hooks_inst.check_foreground_window.return_value = True
+
+            # Tick 1: no keys -> wakeup pulse active
+            # Tick 2, 3: VK_R pressed (0x52, mapped to LEFT_THUMB in rts_menu)
+            keys_list = [set(), {ord("R")}, {ord("R")}]
+            hooks_inst.get_keys_pressed.side_effect = lambda: (
+                keys_list.pop(0) if keys_list else {ord("R")}
+            )
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 3:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "rts_menu"])
+                assert ret == 0
+
+            presses = [
+                c
+                for c in pad_instance.press_button.call_args_list
+                if c == ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB})
+            ]
+            assert len(presses) >= 2  # Wakeup pulse tick 1 + profile mapping tick 2
+
+    def test_wakeup_pulse_left_thumb_cancelled_by_f8_deactivation(self) -> None:
+        """Deactivating capture during wakeup pulse releases LEFT_THUMB immediately."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.consume_stick_swap.return_value = False
+            hooks_inst.consume_mouse_delta.return_value = (0, 0)
+            hooks_inst.get_keys_pressed.return_value = set()
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+            hooks_inst.check_foreground_window.return_value = True
+
+            active_states = [True, False]
+            type(hooks_inst).active = property(
+                lambda self: active_states.pop(0) if active_states else False
+            )
+
+            timer_inst = mock_timer.return_value
+            timer_inst.wait.return_value = 0.004
+
+            with patch("time.sleep", side_effect=KeyboardInterrupt):
+                ret = run_mapper(["--profile", "Shooter"])
+                assert ret == 0
+
+            presses = [
+                c
+                for c in pad_instance.press_button.call_args_list
+                if c == ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB})
+            ]
+            assert len(presses) == 1
+            releases = [
+                c
+                for c in pad_instance.release_button.call_args_list
+                if c == ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB})
+            ]
+            assert len(releases) >= 1
+
+    def test_f10_stick_swap_runtime_toggle(self) -> None:
+        """Verify F10 runtime stick swap toggles mouse routing between Right and Left sticks."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (50, 0)
+            hooks_inst.get_keys_pressed.return_value = {87}  # 'W' key
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            # Tick 1: normal Shooter (mouse -> right stick, wasd -> left stick)
+            # Tick 2: F10 swap consumed -> overrides to left stick
+            # Tick 3: swapped (mouse -> left stick, wasd -> right stick)
+            # Tick 4: F10 swap consumed -> toggles back to right stick
+            # Tick 5: restored (mouse -> right stick, wasd -> left stick)
+            f10_swaps = [False, True, False, True, False]
+
+            def fake_swap() -> bool:
+                if f10_swaps:
+                    return f10_swaps.pop(0)
+                return False
+
+            hooks_inst.consume_stick_swap.side_effect = fake_swap
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 5:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "Shooter"])
+                assert ret == 0
+                assert pad_instance.reset.called
+
+            lj_calls = pad_instance.left_joystick.call_args_list
+            rj_calls = pad_instance.right_joystick.call_args_list
+            assert len(lj_calls) >= 5
+            assert len(rj_calls) >= 5
+
+            # Tick 1 (default Shooter): mouse -> RS, wasd -> LS
+            assert rj_calls[0][1]["x_value"] > 0
+            assert lj_calls[0][1]["y_value"] == 32767
+
+            # Tick 2: F10 swap resets sticks to (0, 0), then routes mouse -> LS, wasd -> RS
+            assert lj_calls[1] == ((), {"x_value": 0, "y_value": 0})
+            assert rj_calls[1] == ((), {"x_value": 0, "y_value": 0})
+            assert lj_calls[2][1]["x_value"] > 0
+            assert rj_calls[2][1]["y_value"] == 32767
+
+            # Tick 4: F10 swap resets sticks to (0, 0), then routes mouse -> RS, wasd -> LS
+            assert lj_calls[4] == ((), {"x_value": 0, "y_value": 0})
+            assert rj_calls[4] == ((), {"x_value": 0, "y_value": 0})
+            assert rj_calls[5][1]["x_value"] > 0
+            assert lj_calls[5][1]["y_value"] == 32767
+
+    def test_f10_stick_swap_runtime_toggle_on_left_stick_profile(self) -> None:
+        """Verify F10 runtime stick swap toggles mouse routing when base profile has mouse_stick='left'."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (50, 0)
+            hooks_inst.get_keys_pressed.return_value = {87}
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            # Tick 1: RTS / Menu (mouse -> left stick, wasd -> right stick)
+            # Tick 2: F10 swap -> overrides to right stick
+            # Tick 4: F10 swap -> toggles back to left stick
+            f10_swaps = [False, True, False, True, False]
+            hooks_inst.consume_stick_swap.side_effect = lambda: (
+                f10_swaps.pop(0) if f10_swaps else False
+            )
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 5:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "rts_menu"])
+                assert ret == 0
+
+            lj_calls = pad_instance.left_joystick.call_args_list
+            rj_calls = pad_instance.right_joystick.call_args_list
+
+            # Tick 1 (default RTS): mouse -> LS, wasd -> RS
+            assert lj_calls[0][1]["x_value"] > 0
+            assert rj_calls[0][1]["y_value"] > 0
+
+            # Tick 2: F10 swap resets sticks to (0, 0), then routes mouse -> RS, wasd -> LS
+            assert lj_calls[1] == ((), {"x_value": 0, "y_value": 0})
+            assert rj_calls[1] == ((), {"x_value": 0, "y_value": 0})
+            assert rj_calls[2][1]["x_value"] > 0
+            assert lj_calls[2][1]["y_value"] > 0
+
+            # Tick 4: F10 swap resets sticks to (0, 0), then routes mouse -> LS, wasd -> RS
+            assert lj_calls[4] == ((), {"x_value": 0, "y_value": 0})
+            assert rj_calls[4] == ((), {"x_value": 0, "y_value": 0})
+            assert lj_calls[5][1]["x_value"] > 0
+            assert rj_calls[5][1]["y_value"] > 0
+
+    def test_f10_stick_swap_override_resets_on_f9_profile_cycle(self) -> None:
+        """Verify that stick_swap_override is reset to False when cycling profiles via F9."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (50, 0)
+            hooks_inst.get_keys_pressed.return_value = {87}
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+
+            # Tick 1: normal Shooter (mouse -> RS, wasd -> LS)
+            # Tick 2: F10 swap -> effective stick becomes 'left' (mouse -> LS, wasd -> RS)
+            # Tick 3: F9 cycle -> cycles profile to Action / RPG (mouse_stick='right'), resets stick_swap_override to False
+            # Tick 4: under Action / RPG with stick_swap_override=False -> mouse routes to RS, wasd to LS
+            f10_events = [False, True, False, False, False]
+            f9_events = [False, False, True, False, False]
+
+            hooks_inst.consume_stick_swap.side_effect = lambda: (
+                f10_events.pop(0) if f10_events else False
+            )
+            hooks_inst.consume_profile_cycle.side_effect = lambda: (
+                f9_events.pop(0) if f9_events else False
+            )
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 4:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "Shooter"])
+                assert ret == 0
+                assert pad_instance.reset.called
+
+            lj_calls = pad_instance.left_joystick.call_args_list
+            rj_calls = pad_instance.right_joystick.call_args_list
+
+            # Tick 1 (Shooter, normal): mouse -> RS, wasd -> LS
+            assert rj_calls[0][1]["x_value"] > 0
+            assert lj_calls[0][1]["y_value"] == 32767
+
+            # Tick 2: F10 swap resets sticks to (0, 0), then routes mouse -> LS, wasd -> RS
+            assert lj_calls[1] == ((), {"x_value": 0, "y_value": 0})
+            assert rj_calls[1] == ((), {"x_value": 0, "y_value": 0})
+            assert lj_calls[2][1]["x_value"] > 0
+            assert rj_calls[2][1]["y_value"] == 32767
+
+            # Tick 3: F9 cycle resets stick_swap_override to False, cycles profile to Action / RPG
+            # Tick 4: Action / RPG has mouse_stick='right', so mouse routes to RS, wasd to LS
+            assert rj_calls[4][1]["x_value"] > 0
+            assert lj_calls[4][1]["y_value"] == 32767

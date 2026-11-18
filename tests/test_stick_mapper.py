@@ -22,6 +22,7 @@ from input_hooks import (
     MSLLHOOKSTRUCT,
     VK_F8,
     VK_F9,
+    VK_F10,
     WM_KEYDOWN,
     WM_MOUSEMOVE,
     InputHooks,
@@ -258,7 +259,9 @@ class TestDLLLoadingAndServiceSecurity:
 
     def test_load_winmm_fallback_on_type_error(self) -> None:
         mock_dll = MagicMock()
-        with patch("ctypes.WinDLL", side_effect=[TypeError("winmode unsupported"), mock_dll]) as mock_windll:
+        with patch(
+            "ctypes.WinDLL", side_effect=[TypeError("winmode unsupported"), mock_dll]
+        ) as mock_windll:
             res = _load_winmm()
             assert res is mock_dll
             assert mock_windll.call_count == 2
@@ -309,7 +312,9 @@ class TestDLLLoadingAndServiceSecurity:
             assert driver_check.is_headless_ci() is True
         with patch.dict("os.environ", {"VGAMEPAD_SKIP_VIGEMBUS_INSTALL": "1"}):
             assert driver_check.is_headless_ci() is True
-        with patch.dict("os.environ", {"CI": "", "GITHUB_ACTIONS": "", "VGAMEPAD_SKIP_VIGEMBUS_INSTALL": ""}):
+        with patch.dict(
+            "os.environ", {"CI": "", "GITHUB_ACTIONS": "", "VGAMEPAD_SKIP_VIGEMBUS_INSTALL": ""}
+        ):
             assert driver_check.is_headless_ci() is False
 
     def test_driver_check_cli_ci_and_admin(self) -> None:
@@ -320,32 +325,38 @@ class TestDLLLoadingAndServiceSecurity:
             assert driver_check.main(["--check-admin"]) == 1
 
         # CLI --ci
-        with patch("driver_check.check_vigembus_service", return_value=(True, "OK")), patch(
-            "driver_check.check_vgamepad_controller", return_value=(True, "OK")
+        with (
+            patch("driver_check.check_vigembus_service", return_value=(True, "OK")),
+            patch("driver_check.check_vgamepad_controller", return_value=(True, "OK")),
         ):
             assert driver_check.main(["--ci"]) == 0
 
     def test_driver_check_start_service_permission_guard(self) -> None:
         # When service is not running and user is not admin
-        with patch("driver_check.check_vigembus_service", return_value=(False, "Stopped")), patch(
-            "driver_check.is_admin", return_value=False
+        with (
+            patch("driver_check.check_vigembus_service", return_value=(False, "Stopped")),
+            patch("driver_check.is_admin", return_value=False),
         ):
             ok, msg = driver_check.start_vigembus_service()
             assert ok is False
             assert "Administrator privileges required" in msg
 
     def test_driver_check_elevate_with_service_arguments(self) -> None:
-        with patch("driver_check.is_admin", return_value=False), patch(
-            "driver_check.elevate_and_run", return_value=True
-        ) as mock_elevate:
+        with (
+            patch("driver_check.is_admin", return_value=False),
+            patch("driver_check.elevate_and_run", return_value=True) as mock_elevate,
+        ):
             ret = driver_check.main(["--start-service", "--elevate"])
             assert ret == 0
             mock_elevate.assert_called_once_with(extra_args=["--start-service"])
 
     def test_driver_check_admin_with_elevate_and_start_service(self) -> None:
-        with patch("driver_check.is_admin", return_value=True), patch(
-            "driver_check.start_vigembus_service", return_value=(True, "Started OK")
-        ) as mock_start:
+        with (
+            patch("driver_check.is_admin", return_value=True),
+            patch(
+                "driver_check.start_vigembus_service", return_value=(True, "Started OK")
+            ) as mock_start,
+        ):
             ret = driver_check.main(["--start-service", "--elevate"])
             assert ret == 0
             mock_start.assert_called_once()
@@ -376,9 +387,11 @@ class TestDLLLoadingAndServiceSecurity:
 
         mock_advapi.QueryServiceStatus.side_effect = fake_query
 
-        with patch("driver_check.is_admin", return_value=True), patch(
-            "driver_check._load_advapi32", return_value=mock_advapi
-        ), patch("time.sleep"):
+        with (
+            patch("driver_check.is_admin", return_value=True),
+            patch("driver_check._load_advapi32", return_value=mock_advapi),
+            patch("time.sleep"),
+        ):
             ok, msg = driver_check.stop_vigembus_service()
             assert ok is True
             assert "stopped successfully" in msg
@@ -389,8 +402,9 @@ class TestDLLLoadingAndServiceSecurity:
         mock_advapi.OpenSCManagerW.return_value = 100
         mock_advapi.OpenServiceW.return_value = None
 
-        with patch("driver_check._load_advapi32", return_value=mock_advapi), patch(
-            "ctypes.get_last_error", return_value=1060
+        with (
+            patch("driver_check._load_advapi32", return_value=mock_advapi),
+            patch("ctypes.get_last_error", return_value=1060),
         ):
             ok, msg = driver_check.check_vigembus_service()
             assert ok is False
@@ -398,9 +412,11 @@ class TestDLLLoadingAndServiceSecurity:
 
     def test_restart_vigembus_service_success_and_failure(self) -> None:
         """Test restart_vigembus_service under both successful and failing stop/start conditions."""
-        with patch("driver_check.stop_vigembus_service", return_value=(True, "stopped")), patch(
-            "driver_check.start_vigembus_service", return_value=(True, "started")
-        ), patch("time.sleep"):
+        with (
+            patch("driver_check.stop_vigembus_service", return_value=(True, "stopped")),
+            patch("driver_check.start_vigembus_service", return_value=(True, "started")),
+            patch("time.sleep"),
+        ):
             ok, msg = driver_check.restart_vigembus_service()
             assert ok is True
             assert "started" in msg
@@ -414,12 +430,14 @@ class TestDLLLoadingAndServiceSecurity:
             assert "Restart failed during service stop phase" in msg
 
         # When service was already stopped, proceeds to start phase
-        with patch(
-            "driver_check.stop_vigembus_service",
-            return_value=(False, "ViGEmBus service is already stopped."),
-        ), patch(
-            "driver_check.start_vigembus_service", return_value=(True, "started")
-        ), patch("time.sleep"):
+        with (
+            patch(
+                "driver_check.stop_vigembus_service",
+                return_value=(False, "ViGEmBus service is already stopped."),
+            ),
+            patch("driver_check.start_vigembus_service", return_value=(True, "started")),
+            patch("time.sleep"),
+        ):
             ok, msg = driver_check.restart_vigembus_service()
             assert ok is True
             assert "started" in msg
@@ -454,8 +472,9 @@ class TestDLLLoadingAndServiceSecurity:
             assert ok is False
             assert "Unsupported OS 'Linux'" in msg
 
-        with patch("platform.system", return_value="Windows"), patch(
-            "platform.version", return_value="10.0.19045"
+        with (
+            patch("platform.system", return_value="Windows"),
+            patch("platform.version", return_value="10.0.19045"),
         ):
             ok, msg = driver_check.check_windows_os()
             assert ok is True
@@ -539,9 +558,10 @@ class TestHighResTimerSafety:
 
     def test_timer_context_pairing_on_exception(self) -> None:
         timer = HighResTimer(hz=TARGET_HZ)
-        with patch.object(stick_mapper._winmm, "timeBeginPeriod") as mock_begin, patch.object(
-            stick_mapper._winmm, "timeEndPeriod"
-        ) as mock_end:
+        with (
+            patch.object(stick_mapper._winmm, "timeBeginPeriod") as mock_begin,
+            patch.object(stick_mapper._winmm, "timeEndPeriod") as mock_end,
+        ):
             with pytest.raises(RuntimeError, match="Simulated loop error"), timer:
                 mock_begin.assert_called_once()
                 raise RuntimeError("Simulated loop error")
@@ -549,9 +569,10 @@ class TestHighResTimerSafety:
 
     def test_timer_close_idempotent(self) -> None:
         timer = HighResTimer(hz=TARGET_HZ)
-        with patch.object(stick_mapper._winmm, "timeBeginPeriod") as mock_begin, patch.object(
-            stick_mapper._winmm, "timeEndPeriod"
-        ) as mock_end:
+        with (
+            patch.object(stick_mapper._winmm, "timeBeginPeriod") as mock_begin,
+            patch.object(stick_mapper._winmm, "timeEndPeriod") as mock_end,
+        ):
             with timer:
                 mock_begin.assert_called_once()
             mock_end.assert_called_once()
@@ -619,6 +640,11 @@ class TestHookSecurityAndReentrancy:
         assert not hooks._f9_held
         assert not hooks.consume_profile_cycle()
 
+        kbd.vkCode = VK_F10
+        hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert not hooks._f10_held
+        assert not hooks.consume_stick_swap()
+
     def test_synthetic_mouse_injection_ignored(self) -> None:
         hooks = InputHooks()
         hooks._active = True
@@ -641,4 +667,3 @@ class TestHookSecurityAndReentrancy:
         hooks.stop()
         hooks._force_unhook()
         hooks._force_unhook()
-

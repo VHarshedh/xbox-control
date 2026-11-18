@@ -51,6 +51,7 @@ WM_QUIT: int = 0x0012
 VK_TAB: int = 0x09
 VK_F8: int = 0x77
 VK_F9: int = 0x78
+VK_F10: int = 0x79
 VK_F11: int = 0x7A
 VK_LWIN: int = 0x5B
 VK_RWIN: int = 0x5C
@@ -108,7 +109,7 @@ if ctypes.sizeof(ctypes.c_void_p) == 8:
     LRESULT: type[ctypes.c_int64] = ctypes.c_int64
 else:
     ULONG_PTR: type[ctypes.c_uint32] = ctypes.c_uint32  # type: ignore[no-redef]
-    LRESULT: type[ctypes.c_int32] = ctypes.c_int32      # type: ignore[no-redef]
+    LRESULT: type[ctypes.c_int32] = ctypes.c_int32  # type: ignore[no-redef]
 
 # LRESULT CALLBACK LowLevelProc(int nCode, WPARAM wParam, LPARAM lParam)
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wt.WPARAM, wt.LPARAM)
@@ -162,12 +163,18 @@ _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
 
 _user32.SetWindowsHookExW.argtypes = [
-    ctypes.c_int, HOOKPROC, wt.HINSTANCE, wt.DWORD,
+    ctypes.c_int,
+    HOOKPROC,
+    wt.HINSTANCE,
+    wt.DWORD,
 ]
 _user32.SetWindowsHookExW.restype = ctypes.c_void_p  # HHOOK
 
 _user32.CallNextHookEx.argtypes = [
-    ctypes.c_void_p, ctypes.c_int, wt.WPARAM, wt.LPARAM,
+    ctypes.c_void_p,
+    ctypes.c_int,
+    wt.WPARAM,
+    wt.LPARAM,
 ]
 _user32.CallNextHookEx.restype = LRESULT
 
@@ -175,17 +182,27 @@ _user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
 _user32.UnhookWindowsHookEx.restype = wt.BOOL
 
 _user32.GetMessageW.argtypes = [
-    ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT,
+    ctypes.POINTER(wt.MSG),
+    wt.HWND,
+    wt.UINT,
+    wt.UINT,
 ]
 _user32.GetMessageW.restype = ctypes.c_int  # -1 error, 0 WM_QUIT, >0 ok
 
 _user32.PeekMessageW.argtypes = [
-    ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT, wt.UINT,
+    ctypes.POINTER(wt.MSG),
+    wt.HWND,
+    wt.UINT,
+    wt.UINT,
+    wt.UINT,
 ]
 _user32.PeekMessageW.restype = wt.BOOL
 
 _user32.PostThreadMessageW.argtypes = [
-    wt.DWORD, wt.UINT, wt.WPARAM, wt.LPARAM,
+    wt.DWORD,
+    wt.UINT,
+    wt.WPARAM,
+    wt.LPARAM,
 ]
 _user32.PostThreadMessageW.restype = wt.BOOL
 
@@ -213,8 +230,10 @@ _kernel32.GetLastError.restype = wt.DWORD
 
 # ── Multi-Monitor and Cursor Bounds Types ────────────────────────────────
 
+
 class MONITORINFO(ctypes.Structure):
     """Win32 MONITORINFO structure."""
+
     _fields_ = [
         ("cbSize", wt.DWORD),
         ("rcMonitor", wt.RECT),
@@ -239,7 +258,9 @@ _user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
 _user32.GetWindowThreadProcessId.restype = wt.DWORD
 
 
-def _get_screen_center(current_pt: tuple[int, int] | None = None) -> tuple[int, int, wt.RECT | None]:
+def _get_screen_center(
+    current_pt: tuple[int, int] | None = None,
+) -> tuple[int, int, wt.RECT | None]:
     """Calculate center coordinates for the screen or active monitor containing current_pt."""
     try:
         sm_cx = _user32.GetSystemMetrics(SM_CXSCREEN)
@@ -284,6 +305,7 @@ def _get_screen_center(current_pt: tuple[int, int] | None = None) -> tuple[int, 
 
 
 # ── DPI Awareness Initialization ─────────────────────────────────────────
+
 
 def _enable_per_monitor_dpi_awareness() -> None:
     """Enable Per-Monitor V2 DPI awareness for pixel-accurate cursor geometry."""
@@ -363,14 +385,16 @@ class InputHooks:
 
         # Unified reentrant state lock for atomic state transitions and consumer reads
         self._lock = threading.RLock()
-        self._keys_lock = self._lock    # Backwards compatibility alias
-        self._mouse_lock = self._lock   # Backwards compatibility alias
+        self._keys_lock = self._lock  # Backwards compatibility alias
+        self._mouse_lock = self._lock  # Backwards compatibility alias
 
         # Capture and toggle states
         self._active: bool = False
         self._f8_held: bool = False
         self._f9_held: bool = False
+        self._f10_held: bool = False
         self._profile_cycle_requested: bool = False
+        self._stick_swap_requested: bool = False
 
         # Keyboard: set of currently-pressed virtual-key codes
         self._keys_down: set[int] = set()
@@ -457,6 +481,13 @@ class InputHooks:
         with self._lock:
             req = self._profile_cycle_requested
             self._profile_cycle_requested = False
+            return req
+
+    def consume_stick_swap(self) -> bool:
+        """Atomically check and consume any pending F10 stick swap request."""
+        with self._lock:
+            req = self._stick_swap_requested
+            self._stick_swap_requested = False
             return req
 
     def reset_held_inputs(self) -> None:
@@ -630,7 +661,12 @@ class InputHooks:
         # Tell the pump thread to exit with retry loop if needed
         tid = self._thread_id
         cur_thread = threading.current_thread()
-        if tid and self._thread is not None and self._thread is not cur_thread and self._thread.is_alive():
+        if (
+            tid
+            and self._thread is not None
+            and self._thread is not cur_thread
+            and self._thread.is_alive()
+        ):
             for _ in range(5):
                 if not self._thread.is_alive():
                     break
@@ -671,23 +707,25 @@ class InputHooks:
 
             # Keyboard hook
             self._kb_hook = _user32.SetWindowsHookExW(
-                WH_KEYBOARD_LL, self._kb_proc_ref, hmod, 0,
+                WH_KEYBOARD_LL,
+                self._kb_proc_ref,
+                hmod,
+                0,
             )
             if not self._kb_hook:
-                raise OSError(
-                    f"SetWindowsHookExW(WH_KEYBOARD_LL) failed: {ctypes.WinError()}"
-                )
+                raise OSError(f"SetWindowsHookExW(WH_KEYBOARD_LL) failed: {ctypes.WinError()}")
 
             # Mouse hook
             self._mouse_hook = _user32.SetWindowsHookExW(
-                WH_MOUSE_LL, self._mouse_proc_ref, hmod, 0,
+                WH_MOUSE_LL,
+                self._mouse_proc_ref,
+                hmod,
+                0,
             )
             if not self._mouse_hook:
                 _user32.UnhookWindowsHookEx(self._kb_hook)
                 self._kb_hook = 0
-                raise OSError(
-                    f"SetWindowsHookExW(WH_MOUSE_LL) failed: {ctypes.WinError()}"
-                )
+                raise OSError(f"SetWindowsHookExW(WH_MOUSE_LL) failed: {ctypes.WinError()}")
 
             self._ready.set()
 
@@ -709,7 +747,9 @@ class InputHooks:
             ms = self._mouse_hook
             if kb:
                 try:
-                    if _user32.UnhookWindowsHookEx(kb) or _kernel32.GetLastError() == 1404:  # ERROR_INVALID_HOOK_HANDLE
+                    if (
+                        _user32.UnhookWindowsHookEx(kb) or _kernel32.GetLastError() == 1404
+                    ):  # ERROR_INVALID_HOOK_HANDLE
                         self._kb_hook = 0
                 except Exception:
                     self._kb_hook = 0
@@ -725,24 +765,38 @@ class InputHooks:
     # ── Hook Callbacks ───────────────────────────────────────────────────
 
     def _keyboard_ll_proc(
-        self, nCode: int, wParam: int, lParam: int,
+        self,
+        nCode: int,
+        wParam: int,
+        lParam: int,
     ) -> int:
         """``WH_KEYBOARD_LL`` callback — capture keys, handle F8/F9 or pass through."""
         try:
             if nCode < 0:
-                return int(_user32.CallNextHookEx(
-                    self._kb_hook, nCode, wParam, lParam,
-                ))
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
 
             kbd = ctypes.cast(
-                lParam, ctypes.POINTER(KBDLLHOOKSTRUCT),
+                lParam,
+                ctypes.POINTER(KBDLLHOOKSTRUCT),
             ).contents
             raw_vk: int = kbd.vkCode
             # Virtual key code sanitization: must be within valid 1..255 byte boundary
             if raw_vk <= 0 or raw_vk > 0xFF:
-                return int(_user32.CallNextHookEx(
-                    self._kb_hook, nCode, wParam, lParam,
-                ))
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
 
             vk: int = raw_vk & 0xFF
             is_injected = bool(kbd.flags & LLKHF_INJECTED_MASK)
@@ -829,9 +883,14 @@ class InputHooks:
                         self._f8_held = False
 
                 # NEVER swallow the toggle key
-                return int(_user32.CallNextHookEx(
-                    self._kb_hook, nCode, wParam, lParam,
-                ))
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
 
             # ── Profile cycle hotkey (F9) ──
             if vk == VK_F9:
@@ -846,22 +905,61 @@ class InputHooks:
                 # When active, swallow F9 so game UI never sees it
                 if self._active:
                     return 1
-                return int(_user32.CallNextHookEx(
-                    self._kb_hook, nCode, wParam, lParam,
-                ))
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
+
+            # ── Stick swap hotkey (F10) ──
+            if vk == VK_F10:
+                if not is_injected:
+                    if wParam in _KEY_DOWN_MSGS and not self._f10_held:
+                        self._f10_held = True
+                        with self._lock:
+                            self._stick_swap_requested = True
+                    elif wParam in _KEY_UP_MSGS:
+                        self._f10_held = False
+
+                # When active, swallow F10 so game UI never sees it
+                if self._active:
+                    return 1
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
 
             # ── Auto-Deactivate on Window Switch (Alt+Tab / Win key) ──
-            if self._active and (vk in (VK_LWIN, VK_RWIN) or (bool(kbd.flags & LLKHF_ALTDOWN) and vk == VK_TAB)):
+            if self._active and (
+                vk in (VK_LWIN, VK_RWIN) or (bool(kbd.flags & LLKHF_ALTDOWN) and vk == VK_TAB)
+            ):
                 self.deactivate()
-                return int(_user32.CallNextHookEx(
-                    self._kb_hook, nCode, wParam, lParam,
-                ))
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
 
             # ── Additional configured passthrough keys ──
             if vk in self._passthrough_keys:
-                return int(_user32.CallNextHookEx(
-                    self._kb_hook, nCode, wParam, lParam,
-                ))
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
 
             # ── Active → record and swallow ──
             if self._active:
@@ -875,9 +973,14 @@ class InputHooks:
                             if was_held:
                                 self._keys_down.discard(vk)
                         if not was_held:
-                            return int(_user32.CallNextHookEx(
-                                self._kb_hook, nCode, wParam, lParam,
-                            ))
+                            return int(
+                                _user32.CallNextHookEx(
+                                    self._kb_hook,
+                                    nCode,
+                                    wParam,
+                                    lParam,
+                                )
+                            )
                 return 1
 
         except Exception:
@@ -886,17 +989,26 @@ class InputHooks:
         return int(_user32.CallNextHookEx(self._kb_hook, nCode, wParam, lParam))
 
     def _mouse_ll_proc(
-        self, nCode: int, wParam: int, lParam: int,
+        self,
+        nCode: int,
+        wParam: int,
+        lParam: int,
     ) -> int:
         """``WH_MOUSE_LL`` callback — capture mouse or pass through."""
         try:
             if nCode < 0 or not self._active:
-                return int(_user32.CallNextHookEx(
-                    self._mouse_hook, nCode, wParam, lParam,
-                ))
+                return int(
+                    _user32.CallNextHookEx(
+                        self._mouse_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
 
             mouse = ctypes.cast(
-                lParam, ctypes.POINTER(MSLLHOOKSTRUCT),
+                lParam,
+                ctypes.POINTER(MSLLHOOKSTRUCT),
             ).contents
 
             # Ignore injected synthetic events (e.g. from SendInput)
@@ -907,9 +1019,14 @@ class InputHooks:
 
             with self._lock:
                 if not self._active:
-                    return int(_user32.CallNextHookEx(
-                        self._mouse_hook, nCode, wParam, lParam,
-                    ))
+                    return int(
+                        _user32.CallNextHookEx(
+                            self._mouse_hook,
+                            nCode,
+                            wParam,
+                            lParam,
+                        )
+                    )
 
                 # ── Movement → accumulate dx/dy relative to screen center ──
                 if msg == WM_MOUSEMOVE:
@@ -973,9 +1090,14 @@ class InputHooks:
         except Exception:
             pass
 
-        return int(_user32.CallNextHookEx(
-            self._mouse_hook, nCode, wParam, lParam,
-        ))
+        return int(
+            _user32.CallNextHookEx(
+                self._mouse_hook,
+                nCode,
+                wParam,
+                lParam,
+            )
+        )
 
     # ── Console Control Handler ──────────────────────────────────────────
 
@@ -1053,6 +1175,7 @@ InputHookManager = InputHooks
 
 
 # ── Self-test ────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     """Run a 10-second self-test: press F8 to toggle, Ctrl+C to quit."""

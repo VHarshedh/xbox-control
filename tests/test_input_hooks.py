@@ -27,6 +27,7 @@ from input_hooks import (
     MSLLHOOKSTRUCT,
     VK_F8,
     VK_F9,
+    VK_F10,
     VK_F11,
     VK_LWIN,
     VK_RWIN,
@@ -93,9 +94,11 @@ class TestConcurrencyAndAtomicState:
         kbd.vkCode = VK_F8
         kbd.flags = 0
 
-        with patch.object(input_hooks._user32, "SetCursorPos", return_value=True), patch.object(
-            input_hooks._user32, "GetCursorPos", return_value=False
-        ), patch.object(input_hooks._user32, "GetSystemMetrics", return_value=1920):
+        with (
+            patch.object(input_hooks._user32, "SetCursorPos", return_value=True),
+            patch.object(input_hooks._user32, "GetCursorPos", return_value=False),
+            patch.object(input_hooks._user32, "GetSystemMetrics", return_value=1920),
+        ):
             res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
 
         assert res != 1  # F8 toggle is never swallowed
@@ -144,6 +147,79 @@ class TestConcurrencyAndAtomicState:
         hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd))
         assert hooks._f9_held is False
 
+    def test_f10_stick_swap_atomic(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_F10
+        kbd.flags = 0
+
+        res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert res == 1  # Swallowed while active
+        assert hooks._f10_held is True
+        assert hooks.consume_stick_swap() is True
+        # Consumption resets the flag atomically
+        assert hooks.consume_stick_swap() is False
+
+        # Release F10 key
+        hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd))
+        assert hooks._f10_held is False
+
+    def test_f10_passthrough_when_inactive(self) -> None:
+        hooks = InputHooks()
+        hooks._active = False
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_F10
+        kbd.flags = 0
+
+        with patch("input_hooks._user32.CallNextHookEx", return_value=42):
+            res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+            assert res == 42  # Passed through when inactive
+            assert hooks._f10_held is True
+            assert hooks.consume_stick_swap() is True
+            assert hooks.consume_stick_swap() is False
+
+        with patch("input_hooks._user32.CallNextHookEx", return_value=42):
+            hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd))
+            assert hooks._f10_held is False
+
+    def test_f10_injected_ignored(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_F10
+        kbd.flags = LLKHF_INJECTED
+
+        res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert res == 1  # Swallowed while active
+        assert hooks._f10_held is False
+        assert hooks.consume_stick_swap() is False
+
+    def test_f10_debounce_key_repeat(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_F10
+        kbd.flags = 0
+
+        hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert hooks.consume_stick_swap() is True
+
+        # Second keydown while held does NOT request another swap
+        hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert hooks.consume_stick_swap() is False
+
+        hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd))
+        assert hooks._f10_held is False
+
+        # Keydown after release requests swap again
+        hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert hooks.consume_stick_swap() is True
+
     def test_reentrancy_in_stop_and_force_unhook(self) -> None:
         hooks = InputHooks()
         # Verify multiple calls to stop and force_unhook do not throw or deadlock
@@ -160,16 +236,18 @@ class TestConcurrencyAndAtomicState:
         hooks._mouse_hook = 0xBBBB
 
         # Unhook fails with error code other than 1404 (e.g. 5: Access Denied) -> handles not zeroed
-        with patch.object(input_hooks._user32, "UnhookWindowsHookEx", return_value=0), patch.object(
-            input_hooks._kernel32, "GetLastError", return_value=5
+        with (
+            patch.object(input_hooks._user32, "UnhookWindowsHookEx", return_value=0),
+            patch.object(input_hooks._kernel32, "GetLastError", return_value=5),
         ):
             hooks._force_unhook()
             assert hooks._kb_hook == 0xAAAA
             assert hooks._mouse_hook == 0xBBBB
 
         # Unhook returns 0 but GetLastError is 1404 (ERROR_INVALID_HOOK_HANDLE) -> handles zeroed
-        with patch.object(input_hooks._user32, "UnhookWindowsHookEx", return_value=0), patch.object(
-            input_hooks._kernel32, "GetLastError", return_value=1404
+        with (
+            patch.object(input_hooks._user32, "UnhookWindowsHookEx", return_value=0),
+            patch.object(input_hooks._kernel32, "GetLastError", return_value=1404),
         ):
             hooks._force_unhook()
             assert hooks._kb_hook == 0
@@ -190,7 +268,9 @@ class TestConcurrencyAndAtomicState:
         kbd = KBDLLHOOKSTRUCT()
         kbd.vkCode = VK_F8
 
-        with patch.object(input_hooks._user32, "GetSystemMetrics", side_effect=RuntimeError("System error")):
+        with patch.object(
+            input_hooks._user32, "GetSystemMetrics", side_effect=RuntimeError("System error")
+        ):
             hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
 
         assert hooks.active is False
@@ -205,31 +285,35 @@ class TestWin32APIErrorHandlingAndBounds:
     def test_dpi_awareness_access_denied_handled(self) -> None:
         # If SetProcessDpiAwarenessContext returns False and GetLastError is 5 (Access Denied),
         # it means DPI awareness is already set, so it should return cleanly without raising.
-        with patch.object(
-            input_hooks._user32, "SetProcessDpiAwarenessContext", return_value=0
-        ), patch.object(input_hooks._kernel32, "GetLastError", return_value=5):
+        with (
+            patch.object(input_hooks._user32, "SetProcessDpiAwarenessContext", return_value=0),
+            patch.object(input_hooks._kernel32, "GetLastError", return_value=5),
+        ):
             input_hooks._enable_per_monitor_dpi_awareness()
 
     def test_dpi_awareness_shcore_and_user32_fallbacks(self) -> None:
         """Verify fallback from SetProcessDpiAwarenessContext to shcore and user32."""
-        with patch.object(
-            input_hooks._user32, "SetProcessDpiAwarenessContext", side_effect=AttributeError
-        ), patch.object(
-            ctypes, "WinDLL"
-        ) as mock_windll:
+        with (
+            patch.object(
+                input_hooks._user32, "SetProcessDpiAwarenessContext", side_effect=AttributeError
+            ),
+            patch.object(ctypes, "WinDLL") as mock_windll,
+        ):
             mock_shcore = MagicMock()
             mock_shcore.SetProcessDpiAwareness.return_value = 0
             mock_windll.return_value = mock_shcore
             input_hooks._enable_per_monitor_dpi_awareness()
             mock_shcore.SetProcessDpiAwareness.assert_called_once_with(2)
 
-        with patch.object(
-            input_hooks._user32, "SetProcessDpiAwarenessContext", side_effect=AttributeError
-        ), patch.object(
-            ctypes, "WinDLL", side_effect=OSError("Not found")
-        ), patch.object(
-            input_hooks._user32, "SetProcessDPIAware", return_value=1
-        ) as mock_user32_dpi:
+        with (
+            patch.object(
+                input_hooks._user32, "SetProcessDpiAwarenessContext", side_effect=AttributeError
+            ),
+            patch.object(ctypes, "WinDLL", side_effect=OSError("Not found")),
+            patch.object(
+                input_hooks._user32, "SetProcessDPIAware", return_value=1
+            ) as mock_user32_dpi,
+        ):
             input_hooks._enable_per_monitor_dpi_awareness()
             mock_user32_dpi.assert_called_once()
 
@@ -265,12 +349,14 @@ class TestWin32APIErrorHandlingAndBounds:
                 obj.y = 540
             return 1
 
-        with patch.object(
-            input_hooks._user32, "GetSystemMetrics", side_effect=fake_get_system_metrics
-        ), patch.object(
-            input_hooks._user32, "SetCursorPos", return_value=True
-        ), patch.object(
-            input_hooks._user32, "GetCursorPos", side_effect=fake_get_cursor_pos_in_bounds
+        with (
+            patch.object(
+                input_hooks._user32, "GetSystemMetrics", side_effect=fake_get_system_metrics
+            ),
+            patch.object(input_hooks._user32, "SetCursorPos", return_value=True),
+            patch.object(
+                input_hooks._user32, "GetCursorPos", side_effect=fake_get_cursor_pos_in_bounds
+            ),
         ):
             hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
             assert hooks._last_pt == (960, 540)
@@ -290,12 +376,14 @@ class TestWin32APIErrorHandlingAndBounds:
                 obj.y = 5000
             return 1
 
-        with patch.object(
-            input_hooks._user32, "GetSystemMetrics", side_effect=fake_get_system_metrics
-        ), patch.object(
-            input_hooks._user32, "SetCursorPos", return_value=True
-        ), patch.object(
-            input_hooks._user32, "GetCursorPos", side_effect=fake_get_cursor_pos_out_of_bounds
+        with (
+            patch.object(
+                input_hooks._user32, "GetSystemMetrics", side_effect=fake_get_system_metrics
+            ),
+            patch.object(input_hooks._user32, "SetCursorPos", return_value=True),
+            patch.object(
+                input_hooks._user32, "GetCursorPos", side_effect=fake_get_cursor_pos_out_of_bounds
+            ),
         ):
             hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
             # Must fall back to screen center (960, 540)
@@ -649,9 +737,11 @@ class TestMouseTrackingAndRecentering:
                 mi.rcMonitor.bottom = 1080
             return 1
 
-        with patch.object(input_hooks._user32, "GetSystemMetrics", side_effect=fake_metrics), patch.object(
-            input_hooks._user32, "MonitorFromPoint", return_value=12345
-        ), patch.object(input_hooks._user32, "GetMonitorInfoW", side_effect=fake_get_monitor_info):
+        with (
+            patch.object(input_hooks._user32, "GetSystemMetrics", side_effect=fake_metrics),
+            patch.object(input_hooks._user32, "MonitorFromPoint", return_value=12345),
+            patch.object(input_hooks._user32, "GetMonitorInfoW", side_effect=fake_get_monitor_info),
+        ):
             cx, cy, rc = input_hooks._get_screen_center((2500, 500))
             assert cx == 2880
             assert cy == 540
@@ -815,10 +905,11 @@ class TestWindowSwitchAndPreCaptureKeys:
         kbd.vkCode = input_hooks.VK_F8
         kbd.flags = 0
 
-        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0xABCD), patch.object(
-            input_hooks._user32, "SetCursorPos"
-        ), patch.object(input_hooks._user32, "ClipCursor"), patch.object(
-            input_hooks._user32, "CallNextHookEx", return_value=0
+        with (
+            patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0xABCD),
+            patch.object(input_hooks._user32, "SetCursorPos"),
+            patch.object(input_hooks._user32, "ClipCursor"),
+            patch.object(input_hooks._user32, "CallNextHookEx", return_value=0),
         ):
             hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
             assert hooks.active is True
@@ -835,8 +926,9 @@ class TestWindowSwitchAndPreCaptureKeys:
             ptr._obj.value = 7777
             return 1
 
-        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x3000), patch.object(
-            input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid
+        with (
+            patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x3000),
+            patch.object(input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid),
         ):
             assert hooks.check_foreground_window() is True
             assert hooks.active is True
@@ -854,8 +946,9 @@ class TestWindowSwitchAndPreCaptureKeys:
             ptr._obj.value = 8888
             return 1
 
-        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x4000), patch.object(
-            input_hooks._user32, "GetWindowThreadProcessId", side_effect=diff_pid
+        with (
+            patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x4000),
+            patch.object(input_hooks._user32, "GetWindowThreadProcessId", side_effect=diff_pid),
         ):
             assert hooks.check_foreground_window() is False
             assert hooks.active is False
@@ -884,8 +977,9 @@ class TestWindowSwitchAndPreCaptureKeys:
             ptr._obj.value = 5555
             return 1
 
-        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x2500), patch.object(
-            input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid
+        with (
+            patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x2500),
+            patch.object(input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid),
         ):
             assert hooks.check_foreground_window() is True
             assert hooks.active is True
@@ -899,7 +993,9 @@ class TestWindowSwitchAndPreCaptureKeys:
         hooks._target_hwnd = 0x1000
         hooks._target_pid = 7777
 
-        with patch.object(input_hooks._user32, "GetForegroundWindow", side_effect=OSError("Win32 error")):
+        with patch.object(
+            input_hooks._user32, "GetForegroundWindow", side_effect=OSError("Win32 error")
+        ):
             assert hooks.check_foreground_window() is False
             assert hooks.active is False
 
@@ -914,8 +1010,9 @@ class TestWindowSwitchAndPreCaptureKeys:
             ptr._obj.value = 4321
             return 1
 
-        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x5000), patch.object(
-            input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid
+        with (
+            patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x5000),
+            patch.object(input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid),
         ):
             assert hooks.check_foreground_window() is True
             assert hooks.active is True
@@ -934,8 +1031,11 @@ class TestWindowSwitchAndPreCaptureKeys:
             ptr._obj.value = 7777
             return 1
 
-        with patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x3000), patch.object(
-            input_hooks._user32, "GetWindowThreadProcessId", side_effect=deactivate_during_call
+        with (
+            patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x3000),
+            patch.object(
+                input_hooks._user32, "GetWindowThreadProcessId", side_effect=deactivate_during_call
+            ),
         ):
             assert hooks.check_foreground_window() is False
             assert hooks._target_hwnd == 0x1000
