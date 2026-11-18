@@ -25,6 +25,7 @@ from input_hooks import (
     LLKHF_LOWER_IL_INJECTED,
     LLMHF_LOWER_IL_INJECTED,
     MSLLHOOKSTRUCT,
+    VK_F7,
     VK_F8,
     VK_F9,
     VK_F10,
@@ -219,6 +220,79 @@ class TestConcurrencyAndAtomicState:
         # Keydown after release requests swap again
         hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
         assert hooks.consume_stick_swap() is True
+
+    def test_f7_wake_pulse_atomic(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_F7
+        kbd.flags = 0
+
+        res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert res == 1  # Swallowed while active
+        assert hooks._f7_held is True
+        assert hooks.consume_wake_pulse() is True
+        # Consumption resets the flag atomically
+        assert hooks.consume_wake_pulse() is False
+
+        # Release F7 key
+        hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd))
+        assert hooks._f7_held is False
+
+    def test_f7_passthrough_when_inactive(self) -> None:
+        hooks = InputHooks()
+        hooks._active = False
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_F7
+        kbd.flags = 0
+
+        with patch("input_hooks._user32.CallNextHookEx", return_value=42):
+            res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+            assert res == 42  # Passed through when inactive
+            assert hooks._f7_held is True
+            assert hooks.consume_wake_pulse() is True
+            assert hooks.consume_wake_pulse() is False
+
+        with patch("input_hooks._user32.CallNextHookEx", return_value=42):
+            hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd))
+            assert hooks._f7_held is False
+
+    def test_f7_injected_ignored(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_F7
+        kbd.flags = LLKHF_INJECTED
+
+        res = hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert res == 1  # Swallowed while active
+        assert hooks._f7_held is False
+        assert hooks.consume_wake_pulse() is False
+
+    def test_f7_debounce_key_repeat(self) -> None:
+        hooks = InputHooks()
+        hooks._active = True
+
+        kbd = KBDLLHOOKSTRUCT()
+        kbd.vkCode = VK_F7
+        kbd.flags = 0
+
+        hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert hooks.consume_wake_pulse() is True
+
+        # Second keydown while held does NOT request another pulse
+        hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert hooks.consume_wake_pulse() is False
+
+        hooks._keyboard_ll_proc(0, WM_KEYUP, ctypes.addressof(kbd))
+        assert hooks._f7_held is False
+
+        # Keydown after release requests pulse again
+        hooks._keyboard_ll_proc(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        assert hooks.consume_wake_pulse() is True
 
     def test_reentrancy_in_stop_and_force_unhook(self) -> None:
         hooks = InputHooks()
@@ -1039,3 +1113,52 @@ class TestWindowSwitchAndPreCaptureKeys:
         ):
             assert hooks.check_foreground_window() is False
             assert hooks._target_hwnd == 0x1000
+
+    def test_check_foreground_window_adopts_from_terminal_process_name(self) -> None:
+        """If target process is a terminal image (e.g. windowsterminal.exe), switching to game/browser adopts it."""
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._target_hwnd = 0x1000
+        hooks._target_pid = 8888  # WindowsTerminal.exe
+
+        def fake_pid(h: Any, ptr: Any) -> int:
+            ptr._obj.value = 9999  # chrome.exe
+            return 1
+
+        def fake_proc_name(pid: int) -> str:
+            if pid == 8888:
+                return "windowsterminal.exe"
+            if pid == 9999:
+                return "chrome.exe"
+            return ""
+
+        with (
+            patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x2000),
+            patch.object(input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid),
+            patch("input_hooks.get_process_image_name", side_effect=fake_proc_name),
+        ):
+            assert hooks.check_foreground_window() is True
+            assert hooks.active is True
+            assert hooks._target_hwnd == 0x2000
+            assert hooks._target_pid == 9999
+
+    def test_check_foreground_window_adopts_within_same_application(self) -> None:
+        """Switching between tabs or windows of the same application adopts the new HWND/PID."""
+        hooks = InputHooks()
+        hooks._active = True
+        hooks._target_hwnd = 0x1000
+        hooks._target_pid = 5001  # Chrome tab 1
+
+        def fake_pid(h: Any, ptr: Any) -> int:
+            ptr._obj.value = 5002  # Chrome tab 2 (different PID)
+            return 1
+
+        with (
+            patch.object(input_hooks._user32, "GetForegroundWindow", return_value=0x2000),
+            patch.object(input_hooks._user32, "GetWindowThreadProcessId", side_effect=fake_pid),
+            patch("input_hooks.get_process_image_name", return_value="chrome.exe"),
+        ):
+            assert hooks.check_foreground_window() is True
+            assert hooks.active is True
+            assert hooks._target_hwnd == 0x2000
+            assert hooks._target_pid == 5002

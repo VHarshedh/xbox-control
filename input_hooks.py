@@ -49,6 +49,7 @@ WM_MOUSEHWHEEL: int = 0x020E
 
 WM_QUIT: int = 0x0012
 VK_TAB: int = 0x09
+VK_F7: int = 0x76
 VK_F8: int = 0x77
 VK_F9: int = 0x78
 VK_F10: int = 0x79
@@ -57,6 +58,20 @@ VK_LWIN: int = 0x5B
 VK_RWIN: int = 0x5C
 
 DEFAULT_PASSTHROUGH_KEYS: frozenset[int] = frozenset({VK_LWIN, VK_RWIN, VK_F11})
+
+TERMINAL_PROCESS_NAMES: frozenset[str] = frozenset(
+    {
+        "windowsterminal.exe",
+        "openconsole.exe",
+        "conhost.exe",
+        "powershell.exe",
+        "pwsh.exe",
+        "cmd.exe",
+        "python.exe",
+        "code.exe",
+        "devenv.exe",
+    }
+)
 
 LLMHF_INJECTED: int = 0x01
 LLMHF_LOWER_IL_INJECTED: int = 0x02
@@ -227,6 +242,44 @@ _kernel32.SetConsoleCtrlHandler.restype = wt.BOOL
 _kernel32.GetLastError.argtypes = []
 _kernel32.GetLastError.restype = wt.DWORD
 
+_kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+_kernel32.OpenProcess.restype = wt.HANDLE
+
+_kernel32.CloseHandle.argtypes = [wt.HANDLE]
+_kernel32.CloseHandle.restype = wt.BOOL
+
+if hasattr(_kernel32, "QueryFullProcessImageNameW"):
+    _kernel32.QueryFullProcessImageNameW.argtypes = [
+        wt.HANDLE,
+        wt.DWORD,
+        wt.LPWSTR,
+        ctypes.POINTER(wt.DWORD),
+    ]
+    _kernel32.QueryFullProcessImageNameW.restype = wt.BOOL
+
+
+def get_process_image_name(pid: int) -> str:
+    """Safely return lowercase image filename for a process ID on Windows."""
+    if pid <= 0:
+        return ""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    try:
+        h_proc = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h_proc:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wt.DWORD(1024)
+            if hasattr(
+                _kernel32, "QueryFullProcessImageNameW"
+            ) and _kernel32.QueryFullProcessImageNameW(h_proc, 0, buf, ctypes.byref(size)):
+                return Path(buf.value).name.lower()
+            return ""
+        finally:
+            _kernel32.CloseHandle(h_proc)
+    except Exception:
+        return ""
+
 
 # ── Multi-Monitor and Cursor Bounds Types ────────────────────────────────
 
@@ -390,9 +443,11 @@ class InputHooks:
 
         # Capture and toggle states
         self._active: bool = False
+        self._f7_held: bool = False
         self._f8_held: bool = False
         self._f9_held: bool = False
         self._f10_held: bool = False
+        self._wake_requested: bool = False
         self._profile_cycle_requested: bool = False
         self._stick_swap_requested: bool = False
 
@@ -481,6 +536,13 @@ class InputHooks:
         with self._lock:
             req = self._profile_cycle_requested
             self._profile_cycle_requested = False
+            return req
+
+    def consume_wake_pulse(self) -> bool:
+        """Atomically check and consume any pending F7 controller wake request."""
+        with self._lock:
+            req = self._wake_requested
+            self._wake_requested = False
             return req
 
     def consume_stick_swap(self) -> bool:
@@ -633,13 +695,16 @@ class InputHooks:
                         return False
                     self._target_pid = target_pid
 
-        # If previous target was the terminal/console launcher, adopt the newly focused window
+        # If previous target was a terminal/console launcher, adopt the newly focused window
         terminal_pids = {os.getpid()}
         if hasattr(os, "getppid"):
             with contextlib.suppress(Exception):
                 terminal_pids.add(os.getppid())
 
-        if target_pid in terminal_pids and cur_pid.value != 0:
+        target_name = get_process_image_name(target_pid)
+        is_target_terminal = target_pid in terminal_pids or target_name in TERMINAL_PROCESS_NAMES
+
+        if is_target_terminal and cur_pid.value != 0:
             with self._lock:
                 if not self._active:
                     return False
@@ -652,6 +717,16 @@ class InputHooks:
                 if not self._active:
                     return False
                 self._target_hwnd = cur_hwnd
+            return True
+
+        # If switching between windows/tabs of the same application (e.g. Chrome tabs, dialogs)
+        cur_name = get_process_image_name(cur_pid.value)
+        if cur_name and target_name and cur_name == target_name:
+            with self._lock:
+                if not self._active:
+                    return False
+                self._target_hwnd = cur_hwnd
+                self._target_pid = cur_pid.value
             return True
 
         self.deactivate()
@@ -917,6 +992,28 @@ class InputHooks:
                         self._f9_held = False
 
                 # When active, swallow F9 so game UI never sees it
+                if self._active:
+                    return 1
+                return int(
+                    _user32.CallNextHookEx(
+                        self._kb_hook,
+                        nCode,
+                        wParam,
+                        lParam,
+                    )
+                )
+
+            # ── Controller wakeup hotkey (F7) ──
+            if vk == VK_F7:
+                if not is_injected:
+                    if wParam in _KEY_DOWN_MSGS and not self._f7_held:
+                        self._f7_held = True
+                        with self._lock:
+                            self._wake_requested = True
+                    elif wParam in _KEY_UP_MSGS:
+                        self._f7_held = False
+
+                # When active, swallow F7 so game UI never sees it
                 if self._active:
                     return 1
                 return int(

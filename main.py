@@ -68,6 +68,7 @@ MAX_CONSECUTIVE_TICK_ERRORS: int = 50
 TICK_ERROR_LOG_INTERVAL_SEC: float = 1.0
 WAKEUP_PULSE_TICKS: int = 10
 WAKEUP_STICK_VALUE: int = 12000
+IDLE_WAKE_INTERVAL_SEC: float = 2.0
 
 
 # ── CLI & Profile Name Validation ────────────────────────────────────────
@@ -526,6 +527,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
 
         print(f"  [OK] Controller created (Active Profile: {profile_mgr.current_profile.name})")
         print("  Controls:")
+        print("    [F7] Wake Controller (pulse L3+A to Chrome/Edge without capturing mouse)")
         print("    [F8] Toggle Input Capture ON / OFF")
         print("    [F9] Cycle Profiles (Shooter <-> RTS / Menu)")
         print("    [F10] Swap Mouse Stick (Right Stick <-> Left Stick)")
@@ -564,6 +566,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
         wakeup_ticks_remaining: int = 0
         wakeup_button_held: bool = False
         stick_swap_override: bool = False
+        last_idle_wake_time: float = time.monotonic()
 
         try:
             while not lifecycle.shutdown_event.is_set():
@@ -623,6 +626,19 @@ def run_mapper(argv: list[str] | None = None) -> int:
                     except Exception as swap_exc:
                         logger.warning("Error swapping sticks: %s", swap_exc)
 
+                # ── Controller wakeup hotkey check (F7 consumed from hook thread) ──
+                if hooks.consume_wake_pulse() is True:
+                    try:
+                        wakeup_ticks_remaining = WAKEUP_PULSE_TICKS
+                        gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                        gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+                        gamepad.update()
+                        wakeup_button_held = True
+                        print("[WAKE] Controller wakeup pulse sent (L3 + A)", flush=True)
+                        logger.debug("Manual F7 controller wakeup pulse triggered.")
+                    except Exception as wake_exc:
+                        logger.warning("Error triggering manual wakeup pulse: %s", wake_exc)
+
                 active = hooks.active
 
                 # ── State transition detection ──
@@ -654,14 +670,26 @@ def run_mapper(argv: list[str] | None = None) -> int:
                             last_controller_state = None
                             ticks_since_update = 0
                             active_ticks = 0
+                            last_idle_wake_time = time.monotonic()
                             print("[OFF] Mouse/KB Released", flush=True)
                             logger.debug("Capture deactivated.")
                     except Exception as trans_exc:
                         logger.warning("Error during state transition: %s", trans_exc)
                     was_active = active
 
-                # ── Inactive idle path: save CPU cycles ──
+                # ── Inactive idle path: save CPU cycles but keep controller alive in browser ──
                 if not active:
+                    now = time.monotonic()
+                    if now - last_idle_wake_time >= IDLE_WAKE_INTERVAL_SEC:
+                        try:
+                            gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                            gamepad.update()
+                            time.sleep(0.040)
+                            gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+                            gamepad.update()
+                            last_idle_wake_time = now
+                        except Exception as idle_wake_exc:
+                            logger.warning("Error during idle controller wakeup: %s", idle_wake_exc)
                     time.sleep(0.010)
                     continue
 

@@ -460,6 +460,7 @@ class TestMainLoopExceptionResilience:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.consume_profile_cycle.return_value = False
             hooks_inst.is_healthy = True
@@ -511,6 +512,7 @@ class TestMainLoopExceptionResilience:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.consume_profile_cycle.return_value = False
             hooks_inst.is_healthy = True
@@ -555,6 +557,7 @@ class TestMainLoopExceptionResilience:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.consume_profile_cycle.return_value = False
             hooks_inst.is_healthy = True
@@ -601,6 +604,7 @@ class TestMainLoopExceptionResilience:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.consume_profile_cycle.return_value = False
             hooks_inst.is_healthy = True
@@ -713,10 +717,11 @@ class TestMainLoopExceptionResilience:
             patch("main.verify_system_requirements", return_value=True),
             patch("vgamepad.VX360Gamepad") as mock_pad_cls,
             patch("main.InputHookManager") as mock_hooks,
-            patch("main.HighResTimer"),
+            patch("main.HighResTimer") as mock_timer,
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = False
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -763,10 +768,11 @@ class TestMainLoopExceptionResilience:
             patch("main.verify_system_requirements", return_value=True),
             patch("vgamepad.VX360Gamepad") as mock_pad_cls,
             patch("main.InputHookManager") as mock_hooks,
-            patch("main.HighResTimer"),
+            patch("main.HighResTimer") as mock_timer,
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = False
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -811,6 +817,7 @@ class TestMainLoopExceptionResilience:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_mouse_delta.return_value = (0, 0)
@@ -854,8 +861,9 @@ class TestMainLoopExceptionResilience:
             patch("main.verify_system_requirements", return_value=True),
             patch("vgamepad.VX360Gamepad") as mock_pad_cls,
             patch("main.InputHookManager") as mock_hooks,
-            patch("main.HighResTimer"),
+            patch("main.HighResTimer") as mock_timer,
         ):
+            _ = mock_timer
             pad_instance = mock_pad_cls.return_value
             pad_instance.register_notification.side_effect = RuntimeError(
                 "Driver notification unsupported"
@@ -894,6 +902,7 @@ class TestMainLoopExceptionResilience:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.consume_profile_cycle.return_value = False
             hooks_inst.is_healthy = True
             hooks_inst.consume_mouse_delta.return_value = (0, 0)
@@ -937,8 +946,9 @@ class TestMainLoopExceptionResilience:
             patch("main.verify_system_requirements", return_value=True),
             patch("vgamepad.VX360Gamepad") as mock_pad_cls,
             patch("main.InputHookManager") as mock_hooks,
-            patch("main.HighResTimer"),
+            patch("main.HighResTimer") as mock_timer,
         ):
+            _ = mock_timer
             pad_instance = mock_pad_cls.return_value
 
             def fake_register(cb: Any) -> None:
@@ -980,10 +990,11 @@ class TestMainLoopExceptionResilience:
             patch("main.verify_system_requirements", return_value=True),
             patch("vgamepad.VX360Gamepad") as mock_pad_cls,
             patch("main.InputHookManager") as mock_hooks,
-            patch("main.HighResTimer"),
+            patch("main.HighResTimer") as mock_timer,
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = False
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1060,6 +1071,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1109,6 +1121,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1159,6 +1172,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1204,6 +1218,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1250,6 +1265,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1297,6 +1313,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1339,6 +1356,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.check_foreground_window.return_value = True
@@ -1399,6 +1417,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.consume_profile_cycle.return_value = False
             hooks_inst.is_healthy = True
@@ -1450,6 +1469,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1505,6 +1525,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1554,6 +1575,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
             hooks_inst.consume_stick_swap.return_value = False
@@ -1598,6 +1620,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1669,6 +1692,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.consume_profile_cycle.return_value = False
@@ -1731,6 +1755,7 @@ class TestMouseStickRouting:
         ):
             pad_instance = mock_pad_cls.return_value
             hooks_inst = mock_hooks.return_value
+            _ = mock_timer
             hooks_inst.active = True
             hooks_inst.is_healthy = True
             hooks_inst.check_foreground_window.return_value = True
@@ -1787,3 +1812,84 @@ class TestMouseStickRouting:
             # Tick 4: Action / RPG has mouse_stick='right', so mouse routes to RS, wasd to LS
             assert rj_calls[4][1]["x_value"] > 0
             assert lj_calls[4][1]["y_value"] == 32767
+
+    def test_f7_wake_pulse_runtime_trigger(self) -> None:
+        """Verify that F7 hotkey triggers a manual wakeup pulse with L3 + A."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            _ = mock_timer
+            hooks_inst.active = True
+            hooks_inst.is_healthy = True
+            hooks_inst.check_foreground_window.return_value = True
+            hooks_inst.consume_mouse_delta.return_value = (0, 0)
+            hooks_inst.get_keys_pressed.return_value = set()
+            hooks_inst.get_mouse_buttons.return_value = (False, False, False, False, False)
+            hooks_inst.consume_wheel_delta.return_value = 0
+            hooks_inst.consume_profile_cycle.return_value = False
+            hooks_inst.consume_stick_swap.return_value = False
+
+            f7_events = [True, False, False]
+            hooks_inst.consume_wake_pulse.side_effect = lambda: (
+                f7_events.pop(0) if f7_events else False
+            )
+
+            timer_inst = mock_timer.return_value
+            tick_count = 0
+
+            def fake_wait() -> float:
+                nonlocal tick_count
+                tick_count += 1
+                if tick_count > 3:
+                    raise KeyboardInterrupt
+                return 0.004
+
+            timer_inst.wait.side_effect = fake_wait
+
+            with patch("time.sleep"):
+                ret = run_mapper(["--profile", "Shooter"])
+                assert ret == 0
+
+            press_calls = pad_instance.press_button.call_args_list
+            assert ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB}) in press_calls
+            assert ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_A}) in press_calls
+
+    def test_inactive_idle_heartbeat_pulses_controller(self) -> None:
+        """Verify that inactive loop periodically pulses LEFT_THUMB to keep controller alive in browser."""
+        with (
+            patch("main.verify_system_requirements", return_value=True),
+            patch("vgamepad.VX360Gamepad") as mock_pad_cls,
+            patch("main.InputHookManager") as mock_hooks,
+            patch("main.HighResTimer") as mock_timer,
+        ):
+            pad_instance = mock_pad_cls.return_value
+            hooks_inst = mock_hooks.return_value
+            _ = mock_timer
+            hooks_inst.active = False
+            hooks_inst.is_healthy = True
+            hooks_inst.consume_wake_pulse.return_value = False
+
+            loop_count = 0
+
+            def fake_sleep(duration: float) -> None:
+                nonlocal loop_count
+                loop_count += 1
+                if loop_count > 3:
+                    raise KeyboardInterrupt
+
+            with patch("time.sleep", side_effect=fake_sleep), patch("time.monotonic") as mock_mono:
+                mock_mono.side_effect = [0.0, 0.0, 2.5, 2.5, 5.0, 5.0]
+                ret = run_mapper(["--profile", "Shooter"])
+                assert ret == 0
+
+            press_calls = [
+                c
+                for c in pad_instance.press_button.call_args_list
+                if c == ((), {"button": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB})
+            ]
+            assert len(press_calls) >= 1
