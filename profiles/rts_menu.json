@@ -27,6 +27,7 @@
         "VK_F": "XUSB_GAMEPAD_Y",
         "VK_X": "XUSB_GAMEPAD_X",
         "VK_RETURN": "XUSB_GAMEPAD_A",
+        "VK_BACK": "XUSB_GAMEPAD_B",
         "VK_C": "XUSB_GAMEPAD_B",
         "VK_Q": "XUSB_GAMEPAD_LEFT_SHOULDER",
         "VK_E": "XUSB_GAMEPAD_RIGHT_SHOULDER",

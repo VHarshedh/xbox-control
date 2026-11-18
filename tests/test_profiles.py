@@ -1480,3 +1480,25 @@ class TestMouseStickConfig:
         prof.reset_controls(mock_gamepad)
         assert not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
         assert not prof.is_button_active(vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+
+    def test_universal_console_menu_bindings_across_all_profiles(self) -> None:
+        profiles_dir = Path(__file__).parents[1] / "profiles"
+        expected_menu_mappings = {
+            0x26: [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP],  # VK_UP
+            0x28: [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN],  # VK_DOWN
+            0x25: [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT],  # VK_LEFT
+            0x27: [vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT],  # VK_RIGHT
+            0x0D: [vg.XUSB_BUTTON.XUSB_GAMEPAD_A],  # VK_RETURN
+            0x08: [vg.XUSB_BUTTON.XUSB_GAMEPAD_B],  # VK_BACK (Backspace)
+            ord("X"): [vg.XUSB_BUTTON.XUSB_GAMEPAD_X],  # VK_X
+        }
+        for profile_name in ["shooter.json", "rts_menu.json", "action_rpg.json"]:
+            prof = ProfileManager.load_profile(profiles_dir / profile_name)
+            for vk_code, expected_buttons in expected_menu_mappings.items():
+                assert vk_code in prof._key_targets, (
+                    f"Profile {profile_name} missing VK {hex(vk_code)}"
+                )
+                assert prof._key_targets[vk_code] == expected_buttons, (
+                    f"Profile {profile_name} VK {hex(vk_code)} mapped to {prof._key_targets[vk_code]}, "
+                    f"expected {expected_buttons}"
+                )
