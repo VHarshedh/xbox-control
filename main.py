@@ -65,6 +65,8 @@ _RESERVED_DEVICE_NAMES: frozenset[str] = frozenset(
 
 MAX_CONSECUTIVE_TICK_ERRORS: int = 50
 TICK_ERROR_LOG_INTERVAL_SEC: float = 1.0
+WAKEUP_PULSE_TICKS: int = 10
+WAKEUP_STICK_VALUE: int = 12000
 
 
 # ── CLI & Profile Name Validation ────────────────────────────────────────
@@ -169,6 +171,9 @@ class AppLifecycle:
         self.timer: HighResTimer | None = None
         self.timer_entered: bool = False
         self.shutdown_event = threading.Event()
+        self.led_number: int | None = None
+        self.slot_warned: bool = False
+        self.vigem_callback: Any = None
 
         self._cleanup_lock = threading.RLock()
         self._cleaned_up: bool = False
@@ -252,12 +257,18 @@ class AppLifecycle:
 
             # 3. Neutralize and delete virtual Xbox 360 controller
             if self.gamepad is not None:
+                if hasattr(self.gamepad, "unregister_notification"):
+                    with contextlib.suppress(Exception):
+                        self.gamepad.unregister_notification()
                 with contextlib.suppress(Exception):
                     self.gamepad.reset()
                     self.gamepad.update()
                 with contextlib.suppress(Exception):
                     del self.gamepad
                 self.gamepad = None
+            self.vigem_callback = None
+            self.led_number = None
+            self.slot_warned = False
 
             # 4. Strictly pair WinMM timeEndPeriod(1)
             if self.timer_entered:
@@ -464,6 +475,35 @@ def run_mapper(argv: list[str] | None = None) -> int:
             print(f"[FAIL] Failed to allocate virtual controller: {exc}", file=sys.stderr)
             return 1
 
+        _slot_lock = threading.Lock()
+
+        def _on_vigem_notification(
+            client: Any,
+            target: Any,
+            large_motor: int,
+            small_motor: int,
+            led_number: int,
+            user_data: Any,
+        ) -> None:
+            with contextlib.suppress(Exception):
+                lifecycle.led_number = led_number
+                if isinstance(led_number, int) and led_number > 0 and not lifecycle.slot_warned:
+                    with _slot_lock:
+                        if not lifecycle.slot_warned:
+                            lifecycle.slot_warned = True
+                            msg = (
+                                f"[WARNING] Virtual controller assigned to XInput Slot {led_number} "
+                                f"(Player {led_number + 1}). Another controller is occupying Slot 0 "
+                                f"(Player 1); xbox.com/play requires Player 1."
+                            )
+                            logger.warning(msg)
+                            print(msg, flush=True)
+
+        if hasattr(gamepad, "register_notification"):
+            with contextlib.suppress(Exception):
+                gamepad.register_notification(_on_vigem_notification)
+                lifecycle.vigem_callback = _on_vigem_notification
+
         print(f"  [OK] Controller created (Active Profile: {profile_mgr.current_profile.name})")
         print("  Controls:")
         print("    [F8] Toggle Input Capture ON / OFF")
@@ -496,6 +536,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
         last_controller_state: tuple[int, int, int, int, int, int, int] | None = None
         ticks_since_update = 0
         active_ticks = 0
+        wakeup_ticks_remaining: int = 0
 
         try:
             while not lifecycle.shutdown_event.is_set():
@@ -506,6 +547,7 @@ def run_mapper(argv: list[str] | None = None) -> int:
                 # ── Profile cycling hotkey check (F9 consumed from hook thread) ──
                 if hooks.consume_profile_cycle():
                     try:
+                        wakeup_ticks_remaining = 0
                         profile_mgr.current_profile.reset_controls(gamepad)
                         hooks.reset_held_inputs()
                         active_prof = profile_mgr.cycle()
@@ -526,15 +568,14 @@ def run_mapper(argv: list[str] | None = None) -> int:
                         if active:
                             timer.reset()
                             profile_mgr.current_profile.mapper.reset()
-                            with contextlib.suppress(Exception):
-                                gamepad.right_joystick(x_value=1, y_value=0)
-                                gamepad.update()
+                            wakeup_ticks_remaining = WAKEUP_PULSE_TICKS
                             last_controller_state = None
                             ticks_since_update = 0
                             active_ticks = 0
                             print(f"[ON] Profile: {profile_mgr.current_profile.name}", flush=True)
                             logger.debug("Capture activated.")
                         else:
+                            wakeup_ticks_remaining = 0
                             profile_mgr.current_profile.reset_controls(gamepad)
                             gamepad.reset()
                             gamepad.update()
@@ -564,6 +605,12 @@ def run_mapper(argv: list[str] | None = None) -> int:
                     # A. Right Stick: accumulate mouse deltas and apply curve
                     dx, dy = hooks.consume_mouse_delta()
                     rx, ry = prof.mapper.step(dx, dy, dt)
+                    if dx != 0 or dy != 0:
+                        wakeup_ticks_remaining = 0
+                    elif wakeup_ticks_remaining > 0:
+                        rx = WAKEUP_STICK_VALUE
+                        ry = 0
+                        wakeup_ticks_remaining -= 1
                     gamepad.right_joystick(x_value=rx, y_value=ry)
 
                     # B. Left Stick: WASD directional inputs with diagonal normalization
@@ -587,12 +634,12 @@ def run_mapper(argv: list[str] | None = None) -> int:
 
                     # D. Commit report to ViGEmBus if state changed or heartbeat reached
                     rep = getattr(gamepad, "report", None)
-                    if rep is not None:
+                    if rep is not None and isinstance(getattr(rep, "sThumbRX", None), (int, float)):
                         current_state = (
-                            int(getattr(rep, "sThumbRX", rx)),
-                            int(getattr(rep, "sThumbRY", ry)),
-                            int(getattr(rep, "sThumbLX", lx)),
-                            int(getattr(rep, "sThumbLY", ly)),
+                            int(rep.sThumbRX),
+                            int(rep.sThumbRY),
+                            int(rep.sThumbLX),
+                            int(rep.sThumbLY),
                             int(getattr(rep, "bLeftTrigger", 0)),
                             int(getattr(rep, "bRightTrigger", 0)),
                             int(getattr(rep, "wButtons", 0)),
@@ -617,12 +664,25 @@ def run_mapper(argv: list[str] | None = None) -> int:
                     if consecutive_tick_errors == 10:
                         try:
                             logger.info("Attempting ViGEmBus controller hot-reconnect at 10 consecutive tick errors.")
+                            # Release old controller first so XInput Slot 0 is freed
+                            old_pad = lifecycle.gamepad or gamepad
+                            if old_pad is not None:
+                                if hasattr(old_pad, "unregister_notification"):
+                                    with contextlib.suppress(Exception):
+                                        old_pad.unregister_notification()
+                                with contextlib.suppress(Exception):
+                                    old_pad.reset()
+                                    old_pad.update()
+                            lifecycle.gamepad = None
+                            gamepad = None
+                            del old_pad
+
                             new_pad = vg.VX360Gamepad()
                             new_pad.reset()
                             new_pad.update()
-                            with contextlib.suppress(Exception):
-                                if lifecycle.gamepad is not None:
-                                    del lifecycle.gamepad
+                            if hasattr(new_pad, "register_notification"):
+                                with contextlib.suppress(Exception):
+                                    new_pad.register_notification(_on_vigem_notification)
                             gamepad = new_pad
                             lifecycle.gamepad = gamepad
                             last_controller_state = None
@@ -630,9 +690,10 @@ def run_mapper(argv: list[str] | None = None) -> int:
                             logger.warning("Hot-reconnect attempt failed: %s", reconnect_exc)
 
                     # Failsafe: reset controller immediately to prevent stuck inputs
-                    with contextlib.suppress(Exception):
-                        gamepad.reset()
-                        gamepad.update()
+                    if gamepad is not None:
+                        with contextlib.suppress(Exception):
+                            gamepad.reset()
+                            gamepad.update()
 
                     # Throttle logging to prevent fast-path I/O saturation (at most 1 log / sec)
                     now = time.monotonic()
