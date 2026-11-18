@@ -75,3 +75,7 @@ $RECYCLE.BIN/
 # Logs and databases
 *.log
 *.sqlite3
+
+# Audit & local reports
+audit_findings.md
+
