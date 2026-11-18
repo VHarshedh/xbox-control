@@ -30,6 +30,9 @@ class TestProfileNameValidation:
         valid_cases = [
             "Shooter",
             "RTS",
+            "RTS / Menu",
+            "Action / RPG",
+            "rts_menu.json",
             "shooter.json",
             "Halo_Infinite",
             "profile-v2",

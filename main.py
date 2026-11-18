@@ -94,7 +94,14 @@ def validate_profile_name(name: str) -> tuple[bool, str]:
     if ":" in stripped:
         return False, "Profile name contains forbidden NTFS Alternate Data Stream separator (':')."
 
-    if "/" in stripped or "\\" in stripped or ".." in stripped:
+    if ".." in stripped or "\\" in stripped or stripped.startswith("/") or stripped.endswith("/"):
+        return (
+            False,
+            "Profile name contains forbidden path separators or traversal components ('..').",
+        )
+
+    # Reject path structures like "sub/profile" while permitting display titles with spaced separators (e.g. "RTS / Menu")
+    if "/" in stripped and " / " not in stripped:
         return (
             False,
             "Profile name contains forbidden path separators or traversal components ('..').",
@@ -109,7 +116,7 @@ def validate_profile_name(name: str) -> tuple[bool, str]:
         return False, f"Profile name '{stripped}' refers to a reserved Windows device name."
 
     # Check forbidden characters for Windows filesystem naming
-    forbidden_chars = set('<>"/\\|?*')
+    forbidden_chars = set('<>"\\|?*')
     found_forbidden = forbidden_chars.intersection(stripped)
     if found_forbidden:
         return (
